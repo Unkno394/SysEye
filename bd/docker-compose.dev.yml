@@ -1,0 +1,101 @@
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt
+  jwt_secret:
+    file: ./secrets/jwt_secret.txt
+  redis_password:
+    file: ./secrets/redis_password.txt
+  email:
+    file: ./secrets/email.txt
+  email_password:
+    file: ./secrets/email_password.txt
+  mistral_api_key:
+    file: ./secrets/mistral_api_key.txt
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: hackaton-postgres-dev
+    restart: unless-stopped
+    secrets:
+      - db_password
+    environment:
+      POSTGRES_DB: hackaton 
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    ports:
+      - "5434:5432" 
+    volumes:
+      - postgres-data-dev:/var/lib/postgresql/data
+    networks:
+      - hackaton-network-dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: hackaton-redis-dev
+    restart: unless-stopped
+    secrets:
+      - redis_password
+    command: >
+      sh -c "redis-server --requirepass $$(cat /run/secrets/redis_password)"
+    ports:
+      - "6381:6379"  
+    volumes:
+      - redis-data-dev:/data
+    networks:
+      - hackaton-network-dev
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "$$(cat /run/secrets/redis_password)", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  backend:
+    build:
+      context: .
+      dockerfile: src/Hackaton/Dockerfile.dev  
+    container_name: hackaton-backend-dev
+    restart: unless-stopped
+    secrets:
+      - db_password
+      - jwt_secret
+      - redis_password
+      - email
+      - email_password
+      - mistral_api_key
+    ports:
+      - "5001:80" 
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_URLS=http://+:80
+      
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - hackaton-network-dev
+    volumes:
+      - ./src:/src
+      - ./src/Hackaton/Logs:/app/Logs
+      - ./src/Hackaton/appsettings.json:/app/appsettings.json
+      - ./src/Resources:/app/Resources
+      - /src/Hackaton/bin
+      - /src/Hackaton/obj
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+
+networks:
+  hackaton-network-dev:
+    driver: bridge
+
+volumes:
+  postgres-data-dev:
+  redis-data-dev:

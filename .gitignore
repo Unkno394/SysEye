@@ -1,0 +1,8 @@
+email-fallback/.env
+cli-agent/.agent_id
+cli-agent/.agent.log
+cli-agent/__pycache__/
+cli-agent/*.pyc
+cli-agent/build/
+cli-agent/dist/
+cli-agent/*.egg-info/

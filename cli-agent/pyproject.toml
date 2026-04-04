@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "syseye-agent"
+version = "0.1.3"
+description = "SysEye CLI agent"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+  { name = "SysEye" },
+]
+keywords = ["syseye", "agent", "cli", "monitoring", "remote-diagnostics"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: System Administrators",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Monitoring",
+  "Topic :: Utilities",
+]
+dependencies = [
+  "requests",
+]
+
+[project.urls]
+Homepage = "https://shkets.ru"
+Source = "https://github.com/Unkno394/SysEye"
+Issues = "https://github.com/Unkno394/SysEye/issues"
+
+[project.scripts]
+syseye-agent = "syseye_agent.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2.1",
+  "twine>=5.1.1",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

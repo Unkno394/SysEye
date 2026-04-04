@@ -1,0 +1,25 @@
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS development
+WORKDIR /src
+
+RUN dotnet tool install --global dotnet-watch
+ENV PATH="$PATH:/root/.dotnet/tools"
+
+COPY src/*.sln .
+COPY src/Application/*.csproj Application/
+COPY src/Domain/*.csproj Domain/
+COPY src/Hackaton/*.csproj Hackaton/
+COPY src/Infrastructure/*.csproj Infrastructure/
+
+RUN dotnet restore
+
+COPY src .
+
+WORKDIR /src/Hackaton
+
+ENV ASPNETCORE_ENVIRONMENT=Development \
+    ASPNETCORE_URLS=http://+:80 \
+    DOTNET_USE_POLLING_FILE_WATCHER=true
+
+EXPOSE 80
+
+ENTRYPOINT ["dotnet", "watch", "run", "--no-launch-profile"]

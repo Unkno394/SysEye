@@ -1,0 +1,93 @@
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt
+  jwt_secret:
+    file: ./secrets/jwt_secret.txt
+  redis_password:
+    file: ./secrets/redis_password.txt
+  email:
+    file: ./secrets/email.txt
+  email_password:
+    file: ./secrets/email_password.txt
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: hackaton-postgres
+    restart: unless-stopped
+    secrets:
+      - db_password
+    environment:
+      POSTGRES_DB: hackaton
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - hackaton-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: hackaton-redis
+    restart: unless-stopped
+    secrets:
+      - redis_password
+    command: >
+      sh -c "redis-server --requirepass $$(cat /run/secrets/redis_password)"
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - hackaton-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "$$(cat /run/secrets/redis_password)", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    image: podsolnuhhh/umir_hackaton:v0.1.1
+    container_name: hackaton-backend
+    restart: unless-stopped
+    secrets:
+      - db_password
+      - jwt_secret
+      - redis_password
+      - email
+      - email_password
+    ports:
+      - "5000:80"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/api/health/live"]
+    env_file:
+      .env  
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:80
+      
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - hackaton-network
+    volumes:
+      - ./src/Hackaton/Logs:/app/Logs
+      - ./src/Resources:/app/Resources 
+
+networks:
+  hackaton-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:

@@ -1,0 +1,101 @@
+Metadata-Version: 2.4
+Name: syseye-agent
+Version: 0.1.3
+Summary: SysEye CLI agent
+Author: SysEye
+License-Expression: MIT
+Project-URL: Homepage, https://shkets.ru
+Project-URL: Source, https://github.com/Unkno394/SysEye
+Project-URL: Issues, https://github.com/Unkno394/SysEye/issues
+Keywords: syseye,agent,cli,monitoring,remote-diagnostics
+Classifier: Development Status :: 3 - Alpha
+Classifier: Environment :: Console
+Classifier: Intended Audience :: System Administrators
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Topic :: System :: Monitoring
+Classifier: Topic :: Utilities
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: requests
+Provides-Extra: dev
+Requires-Dist: build>=1.2.1; extra == "dev"
+Requires-Dist: twine>=5.1.1; extra == "dev"
+Dynamic: license-file
+
+# SysEye CLI agent
+
+Installable Python CLI for SysEye agents.
+
+What it does now:
+- registers itself on the local backend using an API key
+- stores the server `agentId` in `~/.syseye-agent/agent_id`
+- sends heartbeat in the background loop
+- is ready for task polling when internal task endpoints appear
+- can generate autostart service templates for Linux and Windows
+
+Install from PyPI from any directory:
+
+```bash
+pipx install syseye-agent
+```
+
+If `pipx` is not installed yet:
+
+```bash
+sudo pacman -S python-pipx
+```
+
+Alternative install from GitHub:
+
+```bash
+pipx install "git+https://github.com/Unkno394/SysEye.git#subdirectory=cli-agent"
+```
+
+Alternative via virtualenv:
+
+```bash
+git clone https://github.com/Unkno394/SysEye.git
+cd SysEye/cli-agent
+python -m venv .venv
+source .venv/bin/activate
+pip install setuptools wheel requests
+pip install --no-build-isolation .
+```
+
+Run from any console:
+
+```bash
+syseye-agent connect --server http://localhost:5000 --token YOUR_CONNECTION_TOKEN
+```
+
+Version check:
+
+```bash
+syseye-agent version
+```
+
+Linux autostart via systemd user service:
+
+```bash
+mkdir -p ~/.config/systemd/user
+syseye-agent service linux --server http://localhost:5000 --token YOUR_CONNECTION_TOKEN > ~/.config/systemd/user/syseye-agent.service
+systemctl --user daemon-reload
+systemctl --user enable --now syseye-agent.service
+```
+
+Windows autostart via Task Scheduler:
+
+```powershell
+syseye-agent service windows --server http://localhost:5000 --token YOUR_CONNECTION_TOKEN > install-syseye-agent.ps1
+powershell -ExecutionPolicy Bypass -File .\install-syseye-agent.ps1
+```
+
+PyPI publication notes:
+- package metadata lives in [`pyproject.toml`](./pyproject.toml)
+- publishing guide lives in [`PUBLISHING.md`](./PUBLISHING.md)

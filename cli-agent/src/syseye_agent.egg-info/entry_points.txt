@@ -1,0 +1,2 @@
+[console_scripts]
+syseye-agent = syseye_agent.cli:main

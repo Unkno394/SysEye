@@ -1,0 +1,140 @@
+secrets:
+  db_password:
+    file: ./bd/hackaton/secrets/db_password.txt
+  jwt_secret:
+    file: ./bd/hackaton/secrets/jwt_secret.txt
+  redis_password:
+    file: ./bd/hackaton/secrets/redis_password.txt
+  email:
+    file: ./bd/hackaton/secrets/email.txt
+  email_password:
+    file: ./bd/hackaton/secrets/email_password.txt
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    secrets:
+      - db_password
+    environment:
+      POSTGRES_DB: hackaton
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - syseye-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    secrets:
+      - redis_password
+    command: >
+      sh -c "redis-server --requirepass $$(cat /run/secrets/redis_password)"
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - syseye-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "$$(cat /run/secrets/redis_password)", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./bd
+      dockerfile: src/Hackaton/Dockerfile
+      network: host
+    restart: unless-stopped
+    secrets:
+      - db_password
+      - jwt_secret
+      - redis_password
+      - email
+      - email_password
+    env_file:
+      - ./bd/hackaton/.env
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:80
+      ConnectionOptions__DatabaseConnectionTemplate: Host=postgres;Port=5432;Database=hackaton;Username=postgres;Password={0}
+      EmailTemplateOptions__ResourcesPath: Resources
+    ports:
+      - "5000:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - syseye-network
+    volumes:
+      - ./bd/hackaton/src/Hackaton/Logs:/app/Logs
+      - ./bd/hackaton/src/Resources:/app/Resources
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  email-fallback:
+    build:
+      context: ./email-fallback
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./email-fallback/.env
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: hackaton
+      DB_USER: postgres
+      DB_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - syseye-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./front
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      HACKATON_API_BASE_URL: http://backend:80
+    ports:
+      - "3001:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+      email-fallback:
+        condition: service_healthy
+    networks:
+      - syseye-network
+
+networks:
+  syseye-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
