@@ -2,6 +2,10 @@ export async function getReadableApiError(response: Response, fallback: string) 
   try {
     const data = await response.json();
 
+    if (typeof data?.message === "string" && data.message) {
+      return data.message;
+    }
+
     if (typeof data?.title === "string" && data.title && !data.errors) {
       return data.title;
     }

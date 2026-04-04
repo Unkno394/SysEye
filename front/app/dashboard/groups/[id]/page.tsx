@@ -7,6 +7,7 @@ import { ChevronLeft, Layers3, Users } from "lucide-react";
 import { AgentGroupTerminalPanel } from "@/components/agent-group-terminal-panel";
 import { GlassCard, StatusBadge } from "@/components/ui";
 import { apiJson } from "@/lib/api-client";
+import { loadAllCommands } from "@/lib/commands";
 import { getAgentGroup, subscribeToAgentGroups, type AgentGroup } from "@/lib/agent-groups";
 import type { AgentDto, CommandDto, PagedResult } from "@/lib/backend-types";
 import { getAgentStatus, getRelativeHeartbeatLabel } from "@/lib/backend-types";
@@ -34,13 +35,24 @@ export default function AgentGroupDetailsPage() {
     loadGroup();
 
     try {
-      const [agentsData, commandsData] = await Promise.all([
+      const [agentsData, _commandsPage, commands] = await Promise.all([
         apiJson<PagedResult<AgentDto>>("/api/hackaton/agent?take=100&skip=0", { method: "GET" }, "Не удалось загрузить агентов."),
         apiJson<PagedResult<CommandDto>>("/api/hackaton/command?take=100&skip=0", { method: "GET" }, "Не удалось загрузить команды."),
+        loadAllCommands("Не удалось загрузить команды."),
       ]);
 
       setAgents(agentsData.items ?? []);
-      setCommands(commandsData.items ?? []);
+
+      setCommands(commands);
+
+      /* if (commandsData.totalCount > commandItems.length) {
+        const fullCommandsData = await apiJson<PagedResult<CommandDto>>(
+          `/api/hackaton/command?take=${Math.max(COMMANDS_FETCH_LIMIT, commandsData.totalCount)}&skip=0`,
+          { method: "GET" },
+          "РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РєРѕРјР°РЅРґС‹.",
+        );
+        setCommands(fullCommandsData.items ?? commandItems);
+      } */
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Не удалось загрузить данные группы.");
     } finally {

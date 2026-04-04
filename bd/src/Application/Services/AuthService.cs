@@ -122,6 +122,9 @@ namespace Application.Services
             if (session == null)
                 throw new NotFoundException("Такой сессии не существует");
 
+            if (session.Token == null)
+                throw new NotFoundException("Токен сессии не найден");
+
             if (session.Token?.RefreshToken != refreshToken)
             {
                 session.IsActive = false;
@@ -135,24 +138,18 @@ namespace Application.Services
             if (!session.IsActive)
                 throw new BadRequestException("Данная сессия не активна");
 
-            session.Token.IsRevoked = true;
-
-            var newToken = new Token
-            {
-                SessionId = sessionId,
-                RefreshToken = jwtProvider.GenerateRefreshToken(userId, sessionId)
-            };
+            var nextRefreshToken = jwtProvider.GenerateRefreshToken(userId, sessionId);
 
             var tokens = new JwtTokens
             {
                 AccessToken = jwtProvider.GenerateAccessToken(userId, sessionId, user.Role),
-                RefreshToken = newToken.RefreshToken
+                RefreshToken = nextRefreshToken
             };
 
-            session.TokenId = newToken.Id;
+            session.Token.RefreshToken = nextRefreshToken;
+            session.Token.IsRevoked = false;
             session.LastActivity = DateTime.UtcNow;
 
-            await context.UserTokens.AddAsync(newToken, ct);
             await context.SaveChangesAsync(ct);
             return tokens;
         }

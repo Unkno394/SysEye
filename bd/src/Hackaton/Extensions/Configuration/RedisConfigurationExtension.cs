@@ -11,6 +11,16 @@ public static class RedisConfigurationExtension
         var connectionString = builder.Services.BuildServiceProvider()
             .GetRequiredService<IOptions<ConnectionStringsOptions>>().Value;
 
+        var useInMemoryCache = builder.Environment.IsDevelopment()
+            || connectionString.RedisConnectionString.Contains("localhost:6379", StringComparison.OrdinalIgnoreCase)
+            || connectionString.RedisConnectionString.Contains("127.0.0.1:6379", StringComparison.OrdinalIgnoreCase);
+
+        if (useInMemoryCache)
+        {
+            builder.Services.AddDistributedMemoryCache();
+            return builder;
+        }
+
         builder.Services.AddStackExchangeRedisCache(options =>
         {
             options.Configuration = connectionString.RedisConnectionString;

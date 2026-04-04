@@ -4,6 +4,7 @@ using Infrastructure.DbContexts;
 using Infrastructure.Interfaces;
 using Infrastructure.Options;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace Application.Services
@@ -15,7 +16,8 @@ namespace Application.Services
         IRedisCacheService redisCacheService,
         IEmailService emailService,
         IVerificationTokenProvider tokenProvider,
-        AppDbContext context) : IResetPasswordByEmailService
+        AppDbContext context,
+        ILogger<ResetPasswordByEmailService> logger) : IResetPasswordByEmailService
     {
         private readonly VerificationOptions _options = options.Value;
 
@@ -37,6 +39,7 @@ namespace Application.Services
 
             var token = tokenProvider.GenerateResetToken(_options.PasswordTokenLength);
             await redisCacheService.SetAsync(email, token);
+            logger.LogWarning("Password reset token for {Email}: {Token}", email, token);
 
             var html = emailTemplateBuilder.BuildResetPasswordEmail(token, _options.PasswordTokenExpirationMinutes);
             await emailService.SendAsync(email, "Смена пароля", html, ct);

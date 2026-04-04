@@ -70,6 +70,11 @@ services:
       ASPNETCORE_URLS: http://+:80
       ConnectionOptions__DatabaseConnectionTemplate: Host=postgres;Port=5432;Database=hackaton;Username=postgres;Password={0}
       EmailTemplateOptions__ResourcesPath: Resources
+      TelegramBotNotificationsOptions__Enabled: "true"
+      TelegramBotNotificationsOptions__Endpoint: http://host.docker.internal:8081/internal/notifications
+      TelegramBotNotificationsOptions__Secret: syseye-local-telegram-secret-2026
+      TelegramBotNotificationsOptions__SecretHeaderName: X-Webhook-Secret
+      TelegramBotNotificationsOptions__TimeoutSeconds: 5
     ports:
       - "5000:80"
     depends_on:

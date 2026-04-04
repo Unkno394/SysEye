@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { CalendarRange, Play, TerminalSquare, Users } from "lucide-react";
 import { apiJson } from "@/lib/api-client";
 import type { AgentDto, AgentTaskDto, CommandDto, PagedResult, ScenarioDetailsDto, ScenarioDto } from "@/lib/backend-types";
-import { getAgentStatus, getRelativeHeartbeatLabel } from "@/lib/backend-types";
+import { getAgentStatus, getOsLabel, getRelativeHeartbeatLabel } from "@/lib/backend-types";
 import { GlassCard, SectionTitle, StatusBadge } from "@/components/ui";
 
 type GroupTask = {
@@ -48,6 +48,37 @@ function resolveCommandForAgent(item: CommandDto, agent: AgentDto) {
   }
 
   return item.bashScript || item.powerShellScript || "";
+}
+
+function isUnavailableCommand(script: string) {
+  const normalized = script.trim().replace(/^['"]|['"]$/g, "").toLowerCase();
+  return normalized === "unavailable";
+}
+
+function getCommandAvailability(item: CommandDto, agent: AgentDto) {
+  const resolvedCommand = resolveCommandForAgent(item, agent).trim();
+
+  if (!resolvedCommand) {
+    return {
+      resolvedCommand,
+      runnable: false,
+      statusText: `Нет скрипта для ${getOsLabel(agent.os)}`,
+    };
+  }
+
+  if (isUnavailableCommand(resolvedCommand)) {
+    return {
+      resolvedCommand,
+      runnable: false,
+      statusText: `Недоступно для ${getOsLabel(agent.os)}`,
+    };
+  }
+
+  return {
+    resolvedCommand,
+    runnable: true,
+    statusText: "Готова к запуску",
+  };
 }
 
 function extractPlaceholderTokens(script: string) {
@@ -296,12 +327,18 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
   };
 
   const queueCommandTask = async (item: CommandDto) => {
+    const supportedAgents = agents.filter((agent) => getCommandAvailability(item, agent).runnable);
+    if (!supportedAgents.length) {
+      setActionNotice({
+        tone: "error",
+        text: `Команда "${item.name}" недоступна для выбранной группы.`,
+      });
+      return;
+    }
+
     await runBatch(
-      agents.map((agent) => {
-        const command = resolveCommandForAgent(item, agent).trim();
-        if (!command) {
-          return Promise.reject(new Error(`Для агента ${agent.name} команда не настроена.`));
-        }
+      supportedAgents.map((agent) => {
+        const command = getCommandAvailability(item, agent).resolvedCommand;
 
         return apiJson<AgentTaskDto>(
           `/api/hackaton/agent/${agent.id}/tasks/command`,
@@ -484,14 +521,29 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
 
             <div className="terminal-scroll mt-3 flex gap-3 overflow-x-auto pb-1">
               {visibleCommands.map((item) => {
-                const hasPlaceholders = agents.some((agent) => extractPlaceholderTokens(resolveCommandForAgent(item, agent)).length > 0);
+                const supportedAgents = agents.filter((agent) => getCommandAvailability(item, agent).runnable);
+                const supportedAgentsCount = supportedAgents.length;
+                const isRunnable = supportedAgentsCount > 0;
+                const hasPlaceholders = supportedAgents.some((agent) => extractPlaceholderTokens(getCommandAvailability(item, agent).resolvedCommand).length > 0);
+                const statusText = isRunnable
+                  ? supportedAgentsCount === agents.length
+                    ? hasPlaceholders
+                      ? "Откроется один ввод параметров для всей группы"
+                      : "Готова к запуску"
+                    : `Доступно для ${supportedAgentsCount} из ${agents.length}`
+                  : "Недоступно для группы";
 
                 return (
                   <button
                     key={item.id}
                     type="button"
+                    disabled={!isRunnable}
                     onClick={() => handleCommandClick(item)}
-                    className="w-[280px] shrink-0 rounded-2xl border border-white/8 bg-black/20 p-3 text-left transition hover:border-line hover:bg-white/[0.04] sm:w-[300px]"
+                    className={`w-[280px] shrink-0 rounded-2xl border p-3 text-left transition sm:w-[300px] ${
+                      isRunnable
+                        ? "border-white/8 bg-black/20 hover:border-line hover:bg-white/[0.04]"
+                        : "cursor-not-allowed border-amber-500/20 bg-amber-500/5 opacity-75"
+                    }`}
                   >
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                       <div className="break-words font-medium text-white">{item.name}</div>
@@ -504,10 +556,10 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
                       {item.bashScript || item.powerShellScript || "Скрипт не задан"}
                     </div>
                     <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                      <span className="text-xs text-white/40">{hasPlaceholders ? "Откроется один ввод параметров для всей группы" : "Готова к запуску"}</span>
-                      <span className="inline-flex items-center gap-1 text-xs text-accent">
+                      <span className="text-xs text-white/40">{statusText}</span>
+                      <span className={`inline-flex items-center gap-1 text-xs ${isRunnable ? "text-accent" : "text-white/30"}`}>
                         <Play size={12} />
-                        Запустить на группе
+                        {isRunnable ? "Запустить на группе" : "Недоступно"}
                       </span>
                     </div>
                   </button>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import platform
 import subprocess
 import threading
 from typing import Callable
@@ -25,6 +26,31 @@ class CommandExecutor:
             },
         }
 
+    @staticmethod
+    def _build_windows_popen_args() -> list[str]:
+        return [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-OutputFormat",
+            "Text",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "-",
+        ]
+
+    @staticmethod
+    def _build_windows_script(command: str) -> str:
+        return (
+            '$ProgressPreference = "SilentlyContinue"\n'
+            '$ErrorActionPreference = "Stop"\n'
+            '[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)\n'
+            '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n'
+            '$OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n'
+            f"{command}\n"
+        )
+
     def build_command(self, task_type: str | None, os_name: str, raw_command: str | None = None) -> str | None:
         if raw_command:
             return raw_command
@@ -43,16 +69,32 @@ class CommandExecutor:
     ) -> dict[str, str | int]:
         stdout_lines: list[str] = []
         stderr_lines: list[str] = []
+        is_windows = platform.system().lower() == "windows"
 
         try:
-            process = subprocess.Popen(
-                command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-            )
+            if is_windows:
+                process = subprocess.Popen(
+                    self._build_windows_popen_args(),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    bufsize=1,
+                )
+                if process.stdin is not None:
+                    process.stdin.write(self._build_windows_script(command))
+                    process.stdin.close()
+            else:
+                process = subprocess.Popen(
+                    command,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                )
         except Exception as exc:
             return {
                 "status": "error",

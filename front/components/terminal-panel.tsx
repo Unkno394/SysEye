@@ -4,8 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { CalendarRange, Play, TerminalSquare } from "lucide-react";
 import { apiJson } from "@/lib/api-client";
 import type { AgentDto, AgentTaskDto, CommandDto, PagedResult, ScenarioDetailsDto, ScenarioDto } from "@/lib/backend-types";
-import { getRelativeHeartbeatLabel } from "@/lib/backend-types";
-import { getAgentStatus } from "@/lib/backend-types";
+import { getAgentStatus, getOsLabel, getRelativeHeartbeatLabel } from "@/lib/backend-types";
 import { GlassCard, SectionTitle, StatusBadge } from "@/components/ui";
 
 type TerminalTask = {
@@ -26,6 +25,7 @@ type PlaceholderInput = {
 
 type CommandPlatformFilter = "all" | "linux" | "windows";
 type ScenarioFilter = "all" | "ready" | "empty";
+type ActionNotice = { tone: "success" | "error"; text: string } | null;
 
 type TerminalPanelProps = {
   agent: AgentDto;
@@ -44,6 +44,37 @@ function resolveCommandForAgent(item: CommandDto, agent: AgentDto) {
   }
 
   return item.bashScript || item.powerShellScript || "";
+}
+
+function isUnavailableCommand(script: string) {
+  const normalized = script.trim().replace(/^['"]|['"]$/g, "").toLowerCase();
+  return normalized === "unavailable";
+}
+
+function getCommandAvailability(item: CommandDto, agent: AgentDto) {
+  const resolvedCommand = resolveCommandForAgent(item, agent).trim();
+
+  if (!resolvedCommand) {
+    return {
+      resolvedCommand,
+      runnable: false,
+      statusText: `Нет скрипта для ${getOsLabel(agent.os)}`,
+    };
+  }
+
+  if (isUnavailableCommand(resolvedCommand)) {
+    return {
+      resolvedCommand,
+      runnable: false,
+      statusText: `Недоступно для ${getOsLabel(agent.os)}`,
+    };
+  }
+
+  return {
+    resolvedCommand,
+    runnable: true,
+    statusText: "Готова к запуску",
+  };
 }
 
 function extractPlaceholderTokens(script: string) {
@@ -101,6 +132,7 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
   const [commandPlatformFilter, setCommandPlatformFilter] = useState<CommandPlatformFilter>("all");
   const [scenarioQuery, setScenarioQuery] = useState("");
   const [scenarioFilter, setScenarioFilter] = useState<ScenarioFilter>("all");
+  const [actionNotice, setActionNotice] = useState<ActionNotice>(null);
   const panelStatus = getAgentStatus(agent.lastHeartbeatAt);
 
   const loadTasks = async () => {
@@ -243,6 +275,10 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
     );
 
     await loadTasks();
+    setActionNotice({
+      tone: "success",
+      text: `Команда "${title}" поставлена в очередь.`,
+    });
   };
 
   const executeTemplateCommand = async (commandId: string, values: Record<number, string>) => {
@@ -259,6 +295,10 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
     );
 
     await loadTasks();
+    setActionNotice({
+      tone: "success",
+      text: "Шаблонная команда поставлена в очередь.",
+    });
   };
 
   const handleCommandClick = (item: CommandDto) => {
@@ -316,6 +356,53 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
     })();
   };
 
+  const handleCommandCardClick = (item: CommandDto) => {
+    const availability = getCommandAvailability(item, agent);
+    const resolvedCommand = availability.resolvedCommand;
+    if (extractPlaceholderTokens(resolvedCommand).length > 0) {
+      handleCommandClick(item);
+      return;
+    }
+
+    if (!availability.runnable) {
+      setActionNotice({
+        tone: "error",
+        text: `Команда "${item.name}" ${availability.statusText.toLowerCase()}.`,
+      });
+      return;
+    }
+
+    void queueCommandTask(item.name, resolvedCommand).catch((error) => {
+      setActionNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Не удалось поставить команду в очередь.",
+      });
+    });
+  };
+
+  const handleScenarioCardClick = (scenarioId: string) => {
+    void (async () => {
+      try {
+        const tasks = await apiJson<AgentTaskDto[]>(
+          `/api/hackaton/agent/${agent.id}/tasks/scenario/${scenarioId}`,
+          { method: "POST" },
+          "Не удалось поставить сценарий в очередь.",
+        );
+
+        await loadTasks();
+        setActionNotice({
+          tone: "success",
+          text: `Сценарий поставлен в очередь${tasks?.length ? `: ${tasks.length} команд` : ""}.`,
+        });
+      } catch (error) {
+        setActionNotice({
+          tone: "error",
+          text: error instanceof Error ? error.message : "Не удалось поставить сценарий в очередь.",
+        });
+      }
+    })();
+  };
+
   const handleSubmitPlaceholderCommand = () => {
     if (!pendingCommand) return;
 
@@ -353,6 +440,17 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
             </div>
           }
         />
+        {actionNotice ? (
+          <div
+            className={`mt-3 rounded-2xl border px-4 py-3 text-sm ${
+              actionNotice.tone === "success"
+                ? "border-accent/20 bg-accent/10 text-accent"
+                : "border-rose-400/20 bg-rose-400/10 text-rose-100/90"
+            }`}
+          >
+            {actionNotice.text}
+          </div>
+        ) : null}
       </div>
       <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="min-h-[420px] bg-[#03090d] p-3 text-sm sm:p-5">
@@ -394,15 +492,22 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
 
             <div className="terminal-scroll mt-3 flex gap-3 overflow-x-auto pb-1">
               {visibleCommands.map((item) => {
-                const resolvedCommand = resolveCommandForAgent(item, agent);
+                const availability = getCommandAvailability(item, agent);
+                const resolvedCommand = availability.resolvedCommand;
                 const hasPlaceholders = extractPlaceholderTokens(resolvedCommand).length > 0;
+                const isRunnable = availability.runnable;
 
                 return (
                   <button
                     key={item.id}
                     type="button"
-                    onClick={() => handleCommandClick(item)}
-                    className="w-[280px] shrink-0 rounded-2xl border border-white/8 bg-black/20 p-3 text-left transition hover:border-line hover:bg-white/[0.04] sm:w-[300px]"
+                    disabled={!isRunnable}
+                    onClick={() => handleCommandCardClick(item)}
+                    className={`w-[280px] shrink-0 rounded-2xl border p-3 text-left transition sm:w-[300px] ${
+                      isRunnable
+                        ? "border-white/8 bg-black/20 hover:border-line hover:bg-white/[0.04]"
+                        : "cursor-not-allowed border-amber-500/20 bg-amber-500/5 opacity-75"
+                    }`}
                   >
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                       <div className="break-words font-medium text-white">{item.name}</div>
@@ -415,10 +520,10 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
                       {resolvedCommand || "Скрипт не задан"}
                     </div>
                     <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                      <span className="text-xs text-white/40">{hasPlaceholders ? "Нужны параметры перед запуском" : "Готова к запуску"}</span>
-                      <span className="inline-flex items-center gap-1 text-xs text-accent">
+                      <span className="text-xs text-white/40">{isRunnable ? (hasPlaceholders ? "Нужны параметры перед запуском" : availability.statusText) : availability.statusText}</span>
+                      <span className={`inline-flex items-center gap-1 text-xs ${isRunnable ? "text-accent" : "text-white/30"}`}>
                         <Play size={12} />
-                        Запустить
+                        {isRunnable ? "Запустить" : "Недоступно"}
                       </span>
                     </div>
                   </button>
@@ -471,7 +576,7 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
                 <button
                   key={scenario.id}
                   type="button"
-                  onClick={() => handleScenarioClick(scenario.id)}
+                  onClick={() => handleScenarioCardClick(scenario.id)}
                   className="w-[280px] shrink-0 rounded-2xl border border-white/8 bg-black/20 p-3 text-left transition hover:border-line hover:bg-white/[0.04] sm:w-[300px]"
                 >
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">

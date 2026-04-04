@@ -9,6 +9,8 @@ namespace Application.Services;
 
 public class AgentService(AppDbContext context, IRealtimeNotifier realtimeNotifier) : IAgentService
 {
+    private static readonly TimeSpan ManualStatusRefreshWindow = TimeSpan.FromSeconds(45);
+
     private static readonly Func<AppDbContext, Guid, Guid, IQueryable<Agent>> _getAgentQuery = (ctx, agentId, userId) =>
         ctx.Agents.Where(a => a.Id == agentId && a.UserId == userId && !a.IsDeleted);
 
@@ -140,10 +142,9 @@ public class AgentService(AppDbContext context, IRealtimeNotifier realtimeNotifi
         var agent = await _getAgentQuery(context, agentId, userId).FirstOrDefaultAsync(ct);
         if (agent == null) throw new NotFoundException("Агент не существует");
 
-        agent.LastHeartbeatAt = DateTime.UtcNow;
+        if (agent.LastHeartbeatAt < DateTime.UtcNow.Subtract(ManualStatusRefreshWindow))
+            throw new BadRequestException("Агент сейчас оффлайн. Кнопка не переводит машину в online без реального heartbeat от самого агента.");
 
-        await context.SaveChangesAsync(ct);
-        await realtimeNotifier.NotifyAgentUpdatedAsync(userId, MapAgentDto(agent), ct);
         return agent.LastHeartbeatAt;
     }
 

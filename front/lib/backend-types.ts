@@ -11,6 +11,7 @@ export type PagedResult<T> = {
 };
 
 export type UserInfo = {
+  id: string;
   role: Role;
   name: string;
   login?: string;

@@ -9,7 +9,8 @@ using Microsoft.Extensions.Logging;
 public class TaskService(AppDbContext dbContext,
         ILogger<TaskService> logger,
         IAgentCommandDispatcher agentCommandDispatcher,
-        IRealtimeNotifier realtimeNotifier) : ITaskService
+        IRealtimeNotifier realtimeNotifier,
+        ITaskNotificationPublisher taskNotificationPublisher) : ITaskService
 {
     public async Task<List<AgentTaskDto>> EnqueueScenarioAsync(
         Guid agentId,
@@ -32,7 +33,7 @@ public class TaskService(AppDbContext dbContext,
             .ThenInclude(x => x.Placeholders)
             .FirstOrDefaultAsync(x =>
                 x.Id == scenarioId &&
-                x.UserId == userId &&
+                (x.UserId == userId || x.IsSystem) &&
                 !x.IsDeleted, cancellationToken);
 
         if (scenario is null)
@@ -75,6 +76,7 @@ public class TaskService(AppDbContext dbContext,
         {
             var mappedTask = MapAgentTask(task);
             await realtimeNotifier.NotifyTaskQueuedAsync(userId, agentId, mappedTask, cancellationToken);
+            await taskNotificationPublisher.PublishTaskQueuedAsync(userId, agentId, mappedTask, cancellationToken);
             await agentCommandDispatcher.SendCommandAsync(
                 agentId,
                 new AgentCommandDto
@@ -124,6 +126,7 @@ public class TaskService(AppDbContext dbContext,
         var mappedTask = MapAgentTask(task);
 
         await realtimeNotifier.NotifyTaskQueuedAsync(userId, agentId, mappedTask, cancellationToken);
+        await taskNotificationPublisher.PublishTaskQueuedAsync(userId, agentId, mappedTask, cancellationToken);
         await agentCommandDispatcher.SendCommandAsync(
             agentId,
             new AgentCommandDto
@@ -354,7 +357,9 @@ public class TaskService(AppDbContext dbContext,
             task.StartedAt = task.FinishedAt;
 
         await dbContext.SaveChangesAsync(cancellationToken);
-        await realtimeNotifier.NotifyTaskUpdatedAsync(userId, task.AgentId, MapAgentTask(task), cancellationToken);
+        var mappedTask = MapAgentTask(task);
+        await realtimeNotifier.NotifyTaskUpdatedAsync(userId, task.AgentId, mappedTask, cancellationToken);
+        await taskNotificationPublisher.PublishTaskUpdatedAsync(userId, task.AgentId, mappedTask, cancellationToken);
     }
 
     public async Task<Guid> ExecuteCommandAsync(

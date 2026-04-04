@@ -5,6 +5,7 @@ import { FolderKanban, Plus, Search, TerminalSquare, Trash2 } from "lucide-react
 import { SelectFieldUI } from "@/components/select-field-ui";
 import { GlassCard, PrimaryButton, SectionTitle } from "@/components/ui";
 import { apiJson } from "@/lib/api-client";
+import { loadAllCommands } from "@/lib/commands";
 import type {
   CommandDto,
   CommandPlaceholderDto,
@@ -64,6 +65,7 @@ export function CommandsStudio() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [scenarios, setScenarios] = useState<ScenarioDto[]>([]);
   const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(null);
+  const [selectedScenarioIsSystem, setSelectedScenarioIsSystem] = useState(false);
   const [draft, setDraft] = useState<CommandDraft>(emptyDraft);
   const [commandPlatform, setCommandPlatform] = useState<CommandPlatform>("linux");
   const [commandKind, setCommandKind] = useState<CommandKind>("plain");
@@ -81,8 +83,17 @@ export function CommandsStudio() {
 
     try {
       const data = await apiJson<PagedResult<CommandDto>>("/api/hackaton/command?take=100&skip=0", { method: "GET" }, "Не удалось загрузить команды.");
-      setCommands(data.items ?? []);
-    } catch (loadError) {
+      setCommands(await loadAllCommands("Не удалось загрузить команды."));
+
+      /* if (data.totalCount > items.length) {
+        const fullData = await apiJson<PagedResult<CommandDto>>(
+          `/api/hackaton/command?take=${Math.max(COMMANDS_FETCH_LIMIT, data.totalCount)}&skip=0`,
+          { method: "GET" },
+          "РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РєРѕРјР°РЅРґС‹.",
+        );
+        setCommands(fullData.items ?? items);
+      } */
+    } catch {
       setCommands([]);
     } finally {
       setLoading(false);
@@ -197,6 +208,7 @@ export function CommandsStudio() {
   const openNewScenario = () => {
     setMode("new-scenario");
     setSelectedScenarioId(null);
+    setSelectedScenarioIsSystem(false);
     setScenarioName("");
     setScenarioDescription("");
     setScenarioSteps([]);
@@ -209,6 +221,7 @@ export function CommandsStudio() {
   const openScenario = async (scenarioId: string) => {
     setMode("new-scenario");
     setSelectedScenarioId(scenarioId);
+    setSelectedScenarioIsSystem(false);
     setError(null);
     setMessage(null);
     setSaving(true);
@@ -221,6 +234,7 @@ export function CommandsStudio() {
       );
 
       const commandMap = new Map(commandLibrary.map((command) => [command.id, command]));
+      setSelectedScenarioIsSystem(Boolean(details.isSystem));
       setScenarioName(details.name);
       setScenarioDescription(details.description);
       setScenarioSteps(
@@ -429,6 +443,8 @@ export function CommandsStudio() {
   };
 
   const addScenarioCommand = (command: (typeof commandLibrary)[number]) => {
+    if (selectedScenarioIsSystem) return;
+
     if (scenarioSteps.some((step) => step.commandId === command.id)) {
       setMessage("Команда уже добавлена в сценарий.");
       return;
@@ -448,6 +464,8 @@ export function CommandsStudio() {
   };
 
   const moveScenarioStep = (index: number, direction: -1 | 1) => {
+    if (selectedScenarioIsSystem) return;
+
     setScenarioSteps((prev) => {
       const nextIndex = index + direction;
       if (nextIndex < 0 || nextIndex >= prev.length) return prev;
@@ -460,6 +478,8 @@ export function CommandsStudio() {
   };
 
   const removeScenarioStep = (id: string) => {
+    if (selectedScenarioIsSystem) return;
+
     setScenarioSteps((prev) => prev.filter((step) => step.id !== id));
   };
 
@@ -507,6 +527,11 @@ export function CommandsStudio() {
   };
 
   const saveScenario = async () => {
+    if (selectedScenarioIsSystem) {
+      setError("Системный сценарий нельзя редактировать.");
+      return;
+    }
+
     if (!scenarioName.trim()) {
       setError("Укажи название сценария.");
       return;
@@ -563,6 +588,10 @@ export function CommandsStudio() {
 
   const deleteScenario = async () => {
     if (!selectedScenarioId) return;
+    if (selectedScenarioIsSystem) {
+      setError("Системный сценарий нельзя удалить.");
+      return;
+    }
 
     setSaving(true);
     setError(null);
@@ -645,6 +674,11 @@ export function CommandsStudio() {
               {message ? (
                 <div className="rounded-2xl border border-accent/15 bg-accent/[0.08] px-4 py-3 text-sm text-white/70">{message}</div>
               ) : null}
+              {selectedScenarioIsSystem ? (
+                <div className="rounded-2xl border border-sky-400/20 bg-sky-400/10 px-4 py-3 text-sm text-sky-100/90">
+                  Системный сценарий доступен всем пользователям и открыт только для просмотра.
+                </div>
+              ) : null}
 
               <Field
                 label="Название сценария"
@@ -696,6 +730,7 @@ export function CommandsStudio() {
                         )}
                       >
                         <div className="truncate font-medium text-white">{item.name}</div>
+                        <div className="mt-1 text-xs text-accent">{item.isSystem ? "Системный" : "Пользовательский"}</div>
                         <p className="mt-2 line-clamp-2 text-sm leading-5 text-white/55">
                           {item.description || "Описание не задано."}
                         </p>
@@ -758,6 +793,7 @@ export function CommandsStudio() {
                         <button
                           type="button"
                           onClick={() => addScenarioCommand(item)}
+                          disabled={selectedScenarioIsSystem}
                           className="rounded-xl border border-accent/20 bg-accent/10 px-3 py-2 text-xs text-accent transition hover:bg-accent/15 sm:self-start"
                         >
                           + Добавить
@@ -801,6 +837,7 @@ export function CommandsStudio() {
                         <button
                           type="button"
                           onClick={() => moveScenarioStep(index, -1)}
+                          disabled={selectedScenarioIsSystem}
                           className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white/65 transition hover:text-white"
                         >
                           ↑
@@ -808,6 +845,7 @@ export function CommandsStudio() {
                         <button
                           type="button"
                           onClick={() => moveScenarioStep(index, 1)}
+                          disabled={selectedScenarioIsSystem}
                           className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs text-white/65 transition hover:text-white"
                         >
                           ↓
@@ -815,6 +853,7 @@ export function CommandsStudio() {
                         <button
                           type="button"
                           onClick={() => removeScenarioStep(step.id)}
+                          disabled={selectedScenarioIsSystem}
                           className="rounded-xl border border-rose-400/20 bg-rose-400/10 px-3 py-2 text-xs text-rose-200 transition hover:bg-rose-400/15"
                         >
                           Удалить
@@ -840,10 +879,10 @@ export function CommandsStudio() {
               </div>
 
               <div className="flex flex-col gap-3 sm:flex-row">
-                <PrimaryButton onClick={saveScenario} disabled={saving || !scenarioName.trim() || !scenarioSteps.length}>
+                <PrimaryButton onClick={saveScenario} disabled={saving || selectedScenarioIsSystem || !scenarioName.trim() || !scenarioSteps.length}>
                   {saving ? "Сохранение..." : selectedScenarioId ? "Сохранить сценарий" : "Создать сценарий"}
                 </PrimaryButton>
-                {selectedScenarioId ? (
+                {selectedScenarioId && !selectedScenarioIsSystem ? (
                   <button
                     type="button"
                     onClick={deleteScenario}

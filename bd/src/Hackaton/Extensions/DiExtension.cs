@@ -6,7 +6,9 @@ using Infrastructure.BackgroundJobs.Jobs;
 using Infrastructure.BackgroundJobs.Jobs.Interfaces;
 using Infrastructure.Email;
 using Infrastructure.Interfaces;
+using Infrastructure.Options;
 using Infrastructure.Services;
+using Microsoft.Extensions.Options;
 using Web.Services;
 
 namespace Web.Extensions;
@@ -33,6 +35,12 @@ public static class DiExtension
         services.AddScoped<IEmailConfirmService, EmailConfirmService>();
 
         services.AddScoped<IScenarioService, ScenarioService>();
+
+        services.AddHttpClient<ITaskNotificationPublisher, TaskWebhookNotifier>((serviceProvider, client) =>
+        {
+            var settings = serviceProvider.GetRequiredService<IOptions<TelegramBotNotificationsOptions>>().Value;
+            client.Timeout = TimeSpan.FromSeconds(settings.TimeoutSeconds);
+        });
 
         services.AddScoped<ITaskService, TaskService>();
         services.AddScoped<IAgentCommandDispatcher, AgentCommandDispatcher>();

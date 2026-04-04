@@ -11,7 +11,7 @@ public class CommandService(AppDbContext context) : ICommandService
 {
     private static readonly Func<AppDbContext, Guid, Guid, IQueryable<Command>> _getCommandQuery
         = (context, commandId, userId) => context.Commands
-        .Where(c => c.Id == commandId && c.UserId == userId && !c.IsDeleted);
+        .Where(c => c.Id == commandId && !c.IsDeleted && (c.UserId == userId || c.IsSystem));
 
     #region Commands
     public async Task<Command> CreateAsync(
@@ -43,8 +43,9 @@ public class CommandService(AppDbContext context) : ICommandService
     public async Task<PagedResult<CommandDto>> GetUserCommandsAsync(Guid userId, int take, int skip, CancellationToken ct)
     {
         var commands = await context.Commands
-            .Where(c => c.UserId == userId && !c.IsDeleted)
-            .OrderBy(c => c.Name)
+            .Where(c => !c.IsDeleted && (c.UserId == userId || c.IsSystem))
+            .OrderByDescending(c => c.IsSystem)
+            .ThenBy(c => c.Name)
             .Skip(skip)
             .Take(take)
             .Select(c => new CommandDto
@@ -59,7 +60,7 @@ public class CommandService(AppDbContext context) : ICommandService
             .ToListAsync(ct);
 
         var count = await context.Commands
-            .Where(c => c.UserId == userId && !c.IsDeleted)
+            .Where(c => !c.IsDeleted && (c.UserId == userId || c.IsSystem))
             .CountAsync(ct);
 
         return new PagedResult<CommandDto>

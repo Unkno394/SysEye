@@ -11,7 +11,7 @@ public class ScenarioService(AppDbContext context) : IScenarioService
 {
     private static readonly Func<AppDbContext, Guid, Guid, IQueryable<Scenario>> _getScenarioQuery
         = (context, scenarioId, userId) => context.Scenarios
-            .Where(x => x.Id == scenarioId && x.UserId == userId && !x.IsDeleted);
+            .Where(x => x.Id == scenarioId && !x.IsDeleted && (x.UserId == userId || x.IsSystem));
 
     public async Task<Scenario> CreateAsync(
         Guid userId,
@@ -43,6 +43,7 @@ public class ScenarioService(AppDbContext context) : IScenarioService
         CancellationToken ct)
     {
         var scenario = await _getScenarioQuery(context, scenarioId, userId)
+            .Where(x => !x.IsSystem)
             .FirstOrDefaultAsync(ct);
 
         if (scenario is null)
@@ -64,6 +65,7 @@ public class ScenarioService(AppDbContext context) : IScenarioService
         CancellationToken ct)
     {
         var updated = await _getScenarioQuery(context, scenarioId, userId)
+            .Where(x => !x.IsSystem)
             .ExecuteUpdateAsync(setters => setters
                 .SetProperty(x => x.IsDeleted, true), ct);
 
@@ -80,20 +82,22 @@ public class ScenarioService(AppDbContext context) : IScenarioService
         CancellationToken ct)
     {
         var items = await context.Scenarios
-            .Where(x => x.UserId == userId && !x.IsDeleted)
-            .OrderBy(x => x.Name)
+            .Where(x => !x.IsDeleted && (x.UserId == userId || x.IsSystem))
+            .OrderByDescending(x => x.IsSystem)
+            .ThenBy(x => x.Name)
             .Skip(skip)
             .Take(take)
             .Select(x => new ScenarioDto
             {
                 Id = x.Id,
                 Name = x.Name,
-                Description = x.Description
+                Description = x.Description,
+                IsSystem = x.IsSystem
             })
             .ToListAsync(ct);
 
         var totalCount = await context.Scenarios
-            .Where(x => x.UserId == userId && !x.IsDeleted)
+            .Where(x => !x.IsDeleted && (x.UserId == userId || x.IsSystem))
             .CountAsync(ct);
 
         return new PagedResult<ScenarioDto>
@@ -111,12 +115,13 @@ public class ScenarioService(AppDbContext context) : IScenarioService
         CancellationToken ct)
     {
         var scenario = await context.Scenarios
-            .Where(x => x.Id == scenarioId && x.UserId == userId && !x.IsDeleted)
+            .Where(x => x.Id == scenarioId && !x.IsDeleted && (x.UserId == userId || x.IsSystem))
             .Select(x => new ScenarioDetailsDto
             {
                 Id = x.Id,
                 Name = x.Name,
                 Description = x.Description,
+                IsSystem = x.IsSystem,
                 Commands = x.Commands
                     .OrderBy(c => c.Order)
                     .Select(c => new ScenarioCommandDto
@@ -143,13 +148,14 @@ public class ScenarioService(AppDbContext context) : IScenarioService
         CancellationToken ct)
     {
         var scenario = await _getScenarioQuery(context, scenarioId, userId)
+            .Where(x => !x.IsSystem)
             .FirstOrDefaultAsync(ct);
 
         if (scenario is null)
             throw new NotFoundException("Сценарий не существует");
 
         var commandExists = await context.Commands
-            .AnyAsync(x => x.Id == commandId && x.UserId == userId && !x.IsDeleted, ct);
+            .AnyAsync(x => x.Id == commandId && !x.IsDeleted && (x.UserId == userId || x.IsSystem), ct);
 
         if (!commandExists)
             throw new NotFoundException("Команда не найдена");
@@ -181,6 +187,7 @@ public class ScenarioService(AppDbContext context) : IScenarioService
         CancellationToken ct)
     {
         var scenario = await _getScenarioQuery(context, scenarioId, userId)
+            .Where(x => !x.IsSystem)
             .FirstOrDefaultAsync(ct);
 
         if (scenario is null)
@@ -205,6 +212,7 @@ public class ScenarioService(AppDbContext context) : IScenarioService
         CancellationToken ct)
     {
         var scenario = await _getScenarioQuery(context, scenarioId, userId)
+            .Where(x => !x.IsSystem)
             .FirstOrDefaultAsync(ct);
 
         if (scenario is null)

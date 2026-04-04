@@ -6,3 +6,15 @@ cli-agent/*.pyc
 cli-agent/build/
 cli-agent/dist/
 cli-agent/*.egg-info/
+.dotnet-home/
+.nuget/
+.vscode/
+.codex-build-web.log
+.dotnet-build*.log
+.run-build.log
+front/.next-dev.out.log
+front/.next-dev.err.log
+front/.next/
+**/__pycache__/
+**/*.pyc
+**/*.egg-info/

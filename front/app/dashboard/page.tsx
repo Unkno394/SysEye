@@ -8,18 +8,26 @@ import { AgentCard } from "@/components/agent-card";
 import { GlassCard, PrimaryButton, SectionTitle } from "@/components/ui";
 import { apiJson } from "@/lib/api-client";
 import { getAgentGroups, removeAgentGroup, subscribeToAgentGroups, upsertAgentGroup, type AgentGroup } from "@/lib/agent-groups";
+import {
+  buildLinuxServiceGenerateCommand,
+  buildWindowsInstallScriptContent,
+  getCliInstallCommand,
+  getDefaultAgentServerUrl,
+  getLinuxServiceEnableCommand,
+  getWindowsPathRefreshNote,
+  getWindowsPipxInstallCommand,
+  getWindowsServiceEnableCommand,
+  inferAgentServerUrl,
+} from "@/lib/agent-launch";
 import type { AgentConnectionTokenDto, AgentDto, PagedResult } from "@/lib/backend-types";
 import { getAgentStatus, getDistributionLabel } from "@/lib/backend-types";
 
-const CLI_PYPI_INSTALL = "pipx install syseye-agent";
-const DEFAULT_AGENT_SERVER_URL = "http://localhost:5000";
-const buildLinuxServiceGenerateCommand = (serverUrl: string, token: string) =>
-  `syseye-agent service linux --server ${serverUrl} --token "${token}" > ~/.config/systemd/user/syseye-agent.service`;
-const LINUX_SERVICE_ENABLE_COMMAND = "systemctl --user daemon-reload && systemctl --user enable --now syseye-agent.service";
-const WINDOWS_PIPX_INSTALL = "py -m pip install --user pipx && py -m pipx ensurepath";
-const buildWindowsServiceGenerateCommand = (serverUrl: string, token: string) =>
-  `syseye-agent service windows --server ${serverUrl} --token "${token}" > install-syseye-agent.ps1`;
-const WINDOWS_SERVICE_ENABLE_COMMAND = "powershell -ExecutionPolicy Bypass -File .\\install-syseye-agent.ps1";
+const CLI_PYPI_INSTALL = getCliInstallCommand();
+const DEFAULT_AGENT_SERVER_URL = getDefaultAgentServerUrl();
+const LINUX_SERVICE_ENABLE_COMMAND = getLinuxServiceEnableCommand();
+const WINDOWS_PIPX_INSTALL = getWindowsPipxInstallCommand();
+const WINDOWS_PATH_REFRESH_NOTE = getWindowsPathRefreshNote();
+const WINDOWS_SERVICE_ENABLE_COMMAND = getWindowsServiceEnableCommand();
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -81,12 +89,7 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const { hostname } = window.location;
-    if (!hostname) return;
-
-    setAgentServerUrl(`http://${hostname}:5000`);
+    setAgentServerUrl(inferAgentServerUrl());
   }, []);
 
   const summary = useMemo(() => {
@@ -328,10 +331,12 @@ export default function DashboardPage() {
         {loading ? (
           <GlassCard className="p-8 text-center text-white/55">Загрузка агентов...</GlassCard>
         ) : agents.length ? (
-          <div className="grid gap-5 xl:grid-cols-2">
+          <div className="terminal-scroll max-h-[680px] overflow-y-auto pr-1">
+            <div className="grid gap-5 xl:grid-cols-2">
             {agents.map((agent) => (
               <AgentCard key={agent.id} agent={agent} />
             ))}
+            </div>
           </div>
         ) : (
           <GlassCard className="p-8 text-center text-white/55">
@@ -417,6 +422,7 @@ export default function DashboardPage() {
                       <div className="mt-2 rounded-xl border border-white/8 bg-black/25 px-3 py-2 font-mono text-xs break-all whitespace-pre-wrap text-[#9af7c8]">
                         {CLI_PYPI_INSTALL}
                       </div>
+                      {instructionPlatform === "windows" ? <div className="mt-2 text-xs text-white/45">{WINDOWS_PATH_REFRESH_NOTE}</div> : null}
                     </div>
 
                     <div className="mt-4">
@@ -425,21 +431,30 @@ export default function DashboardPage() {
                         <div className="mt-2 rounded-xl border border-white/8 bg-black/25 px-3 py-2 font-mono text-xs break-all whitespace-pre-wrap text-[#9af7c8]">
                           mkdir -p ~/.config/systemd/user
                         </div>
-                      ) : null}
+                      ) : (
+                        <div className="mt-2 text-xs text-white/45">
+                          Сохрани текст ниже в файл <code>install-syseye-agent.ps1</code>.
+                        </div>
+                      )}
                       <div className="mt-2 rounded-xl border border-white/8 bg-black/25 px-3 py-2 font-mono text-xs break-all whitespace-pre-wrap text-[#9af7c8]">
                         {instructionPlatform === "linux"
                           ? buildLinuxServiceGenerateCommand(agentServerUrl, createdAgentToken)
-                          : buildWindowsServiceGenerateCommand(agentServerUrl, createdAgentToken)}
+                          : buildWindowsInstallScriptContent(agentServerUrl, createdAgentToken)}
                       </div>
                     </div>
 
                     <div className="mt-4">
-                      <div className="text-xs uppercase tracking-[0.2em] text-white/40">Шаг 3. Включить автозапуск</div>
+                      <div className="text-xs uppercase tracking-[0.2em] text-white/40">Шаг 3. Запустить агента в фоне</div>
                       <div className="mt-2 rounded-xl border border-white/8 bg-black/25 px-3 py-2 font-mono text-xs break-all whitespace-pre-wrap text-[#9af7c8]">
                         {instructionPlatform === "linux"
                           ? LINUX_SERVICE_ENABLE_COMMAND
                           : WINDOWS_SERVICE_ENABLE_COMMAND}
                       </div>
+                      {instructionPlatform === "windows" ? (
+                        <div className="mt-2 text-xs text-white/45">
+                          Запусти команду один раз. После старта агента в hidden/background режиме терминал можно закрыть.
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                 </div>

@@ -1,6 +1,6 @@
 import type { NextRequest } from "next/server";
 
-const HACKATON_API_BASE_URL = process.env.HACKATON_API_BASE_URL ?? "http://127.0.0.1:5000";
+const HACKATON_API_BASE_URL = process.env.HACKATON_API_BASE_URL ?? "http://localhost:5000";
 
 async function proxyToHackaton(request: NextRequest, path: string[]) {
   const targetUrl = new URL(`/api/${path.join("/")}`, HACKATON_API_BASE_URL);

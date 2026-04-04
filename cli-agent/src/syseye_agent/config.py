@@ -8,6 +8,8 @@ from pathlib import Path
 
 APP_DIR = Path.home() / ".syseye-agent"
 DEFAULT_STATE_FILE = APP_DIR / "agent_id"
+DEFAULT_LOG_FILE = APP_DIR / "agent.log"
+DEFAULT_INSTANCE_LOCK_FILE = APP_DIR / "agent.lock"
 
 
 @dataclass
@@ -25,6 +27,7 @@ class AgentConfig:
     request_timeout: int = 15
     command_timeout: int = 60
     state_file: str = field(default_factory=lambda: str(DEFAULT_STATE_FILE))
+    instance_lock_file: str = field(default_factory=lambda: str(DEFAULT_INSTANCE_LOCK_FILE))
 
 
 def ensure_app_dir() -> Path:

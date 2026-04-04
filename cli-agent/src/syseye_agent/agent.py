@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import platform
 import socket
 import threading
@@ -14,6 +15,69 @@ from syseye_agent.executor import CommandExecutor
 from syseye_agent.realtime import AgentRealtimeClient, RealtimeClientError
 
 
+class SingleInstanceError(RuntimeError):
+    pass
+
+
+class SingleInstanceLock:
+    def __init__(self, path: Path):
+        self.path = path
+        self.handle = None
+
+    def acquire(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+b")
+
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            handle.seek(0)
+            handle.truncate()
+            handle.write(f"{os.getpid()}\n".encode("utf-8"))
+            handle.flush()
+        except OSError as exc:
+            handle.close()
+            raise SingleInstanceError("agent is already running for this user session") from exc
+
+        self.handle = handle
+
+    def release(self) -> None:
+        if self.handle is None:
+            return
+
+        try:
+            self.handle.seek(0)
+            self.handle.truncate()
+
+            if os.name == "nt":
+                import msvcrt
+
+                self.handle.write(b"\0")
+                self.handle.flush()
+                self.handle.seek(0)
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self.handle.close()
+            self.handle = None
+
+
 class Agent:
     def __init__(self, config: AgentConfig):
         self.config = config
@@ -21,6 +85,7 @@ class Agent:
         self.api = ApiClient(config.server_url, self.token.api_key, config.request_timeout)
         self.executor = CommandExecutor()
         self.state_path = Path(config.state_file).expanduser()
+        self.instance_lock = SingleInstanceLock(Path(config.instance_lock_file).expanduser())
         self.agent_id = self._load_id() or self.token.agent_id
         self.hostname = socket.gethostname()
         self.os_name = platform.system().lower()
@@ -274,36 +339,45 @@ class Agent:
         self.worker_started = True
 
     def run(self) -> None:
+        try:
+            self.instance_lock.acquire()
+        except SingleInstanceError as exc:
+            self._log(f"[ERR] {exc}")
+            return
+
         self._ensure_worker()
         self.register()
 
-        while True:
-            try:
-                self.heartbeat()
+        try:
+            while True:
+                try:
+                    self.heartbeat()
 
-                if self.agent_id and self.realtime is None:
-                    self._rebuild_realtime_client()
+                    if self.agent_id and self.realtime is None:
+                        self._rebuild_realtime_client()
 
-                if self.realtime is not None:
-                    try:
-                        self.realtime.ensure_connected()
-                    except RealtimeClientError as exc:
-                        now = time.time()
-                        if now - self.last_realtime_error >= max(5, self.config.poll_interval):
-                            self._log(f"[ERR] realtime connect: {exc}")
-                            self.last_realtime_error = now
+                    if self.realtime is not None:
+                        try:
+                            self.realtime.ensure_connected()
+                        except RealtimeClientError as exc:
+                            now = time.time()
+                            if now - self.last_realtime_error >= max(5, self.config.poll_interval):
+                                self._log(f"[ERR] realtime connect: {exc}")
+                                self.last_realtime_error = now
 
-                if self.agent_id and (self.realtime is None or not self.realtime.is_connected):
-                    task = self.api.get_task(self.agent_id)
-                    if task is not None:
-                        self._execute_payload(task)
-            except ApiError as exc:
-                if exc.status_code == 404:
-                    self.agent_id = self.token.agent_id
-                    self.register()
-                else:
+                    if self.agent_id and (self.realtime is None or not self.realtime.is_connected):
+                        task = self.api.get_task(self.agent_id)
+                        if task is not None:
+                            self._execute_payload(task)
+                except ApiError as exc:
+                    if exc.status_code == 404:
+                        self.agent_id = self.token.agent_id
+                        self.register()
+                    else:
+                        print(f"[ERR] loop: {exc}")
+                except Exception as exc:  # pragma: no cover - runtime safety
                     print(f"[ERR] loop: {exc}")
-            except Exception as exc:  # pragma: no cover - runtime safety
-                print(f"[ERR] loop: {exc}")
 
-            time.sleep(max(1, self.config.poll_interval))
+                time.sleep(max(1, self.config.poll_interval))
+        finally:
+            self.instance_lock.release()

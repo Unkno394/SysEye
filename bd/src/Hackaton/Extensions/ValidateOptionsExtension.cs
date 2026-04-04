@@ -51,6 +51,10 @@ namespace Web.Extensions
                 .Bind(configuration.GetSection("ApiKeyOptions"))
                 .ValidateOnStart();
 
+            services.AddOptions<TelegramBotNotificationsOptions>()
+                .Bind(configuration.GetSection("TelegramBotNotificationsOptions"))
+                .ValidateOnStart();
+
             services.AddOptions<ConnectionStringsOptions>()
                 .Bind(configuration.GetSection("ConnectionOptions"))
                 .PostConfigure(options =>
@@ -77,6 +81,7 @@ namespace Web.Extensions
             builder.Services.AddSingleton<IValidateOptions<LoggingOptions>, LoggingOptionsValidator>();
             builder.Services.AddSingleton<IValidateOptions<VerificationOptions>, VerificationOptionsValidator>();
             builder.Services.AddSingleton<IValidateOptions<ConnectionStringsOptions>, ConnectionStringsOptionsValidator>();
+            builder.Services.AddSingleton<IValidateOptions<TelegramBotNotificationsOptions>, TelegramBotNotificationsOptionsValidator>();
 
             return builder;
         }
