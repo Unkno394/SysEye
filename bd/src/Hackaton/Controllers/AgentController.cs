@@ -1,5 +1,4 @@
-﻿using System.Text;
-using System.Text.Json;
+﻿using System.Text.Json;
 using Application.DTO;
 using Application.Interfaces;
 using Microsoft.AspNetCore.Authorization;
@@ -13,7 +12,7 @@ namespace Web.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 [ProducesResponseType(401)]
-public class AgentController(IAgentService agentService, IApiKeyService apiKeyService, ITaskService taskService) : ControllerBase
+public class AgentController(IAgentService agentService, IApiKeyService apiKeyService) : ControllerBase
 {
     /// <summary>
     /// Создаёт нового агента.
@@ -31,27 +30,32 @@ public class AgentController(IAgentService agentService, IApiKeyService apiKeySe
         return Ok(agent.Id);
     }
 
-    [HttpGet("{id}/connection-token")]
+    /// <summary>
+    /// Создаёт агента и возвращает токен подключения для CLI.
+    /// </summary>
+    [HttpPost("connection-token")]
     [Produces(typeof(AgentConnectionTokenDto))]
-    public async Task<ActionResult<AgentConnectionTokenDto>> GetConnectionToken(Guid id, CancellationToken ct)
+    public async Task<ActionResult<AgentConnectionTokenDto>> CreateConnectionToken([FromBody] CreateAgentRequest request, CancellationToken ct)
     {
-        var agent = await agentService.Get(id, User.GetUserId(), ct);
+        var agent = await agentService.Create(
+            User.GetUserId(),
+            request.Name,
+            request.Os,
+            ct);
 
-        if (agent == null) return NotFound();
-
-        var apiKey = await apiKeyService.Generate(agent.Id, 3650, ct);
-        var payload = new
+        var apiKey = await apiKeyService.Generate(agent.Id, 30, ct);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
         {
-            v = 1,
             agentId = agent.Id,
             apiKey = apiKey.Value,
-        };
-
-        var token = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload)));
+            name = agent.Name
+        });
 
         return Ok(new AgentConnectionTokenDto
         {
-            Token = token,
+            AgentId = agent.Id,
+            Name = agent.Name,
+            Token = Convert.ToBase64String(payload),
         });
     }
 
@@ -91,7 +95,6 @@ public class AgentController(IAgentService agentService, IApiKeyService apiKeySe
             id,
             User.GetUserId(),
             request.Name,
-            request.IpAddress,
             request.Os,
             ct);
 
@@ -115,37 +118,5 @@ public class AgentController(IAgentService agentService, IApiKeyService apiKeySe
         var timestamp = await agentService.HeartbeatAsync(id, User.GetUserId(), ct);
 
         return Ok(timestamp);
-    }
-
-    [HttpPost("{id}/tasks/command")]
-    [Produces(typeof(AgentTaskDto))]
-    public async Task<ActionResult<AgentTaskDto>> QueueCommand(Guid id, [FromBody] QueueCommandTaskRequest request, CancellationToken ct)
-    {
-        var task = await taskService.EnqueueCommandAsync(id, User.GetUserId(), request.Title, request.Command, ct);
-        return Ok(task);
-    }
-
-    [HttpPost("{id}/tasks/scenario/{scenarioId}")]
-    [Produces(typeof(List<AgentTaskDto>))]
-    public async Task<ActionResult<List<AgentTaskDto>>> QueueScenario(Guid id, Guid scenarioId, CancellationToken ct)
-    {
-        var tasks = await taskService.EnqueueScenarioAsync(id, User.GetUserId(), scenarioId, ct);
-        return Ok(tasks);
-    }
-
-    [HttpGet("{id}/tasks")]
-    [Produces(typeof(PagedResult<AgentTaskDto>))]
-    public async Task<ActionResult<PagedResult<AgentTaskDto>>> GetTasks(Guid id, [FromQuery] PagedRequest request, CancellationToken ct)
-    {
-        var tasks = await taskService.GetAgentTasksAsync(id, User.GetUserId(), request.Take, request.Skip, ct);
-        return Ok(tasks);
-    }
-
-    [HttpGet("{id}/metrics")]
-    [Produces(typeof(AgentMetricsDto))]
-    public async Task<ActionResult<AgentMetricsDto>> GetMetrics(Guid id, CancellationToken ct)
-    {
-        var metrics = await taskService.GetAgentMetricsAsync(id, User.GetUserId(), ct);
-        return Ok(metrics);
     }
 }

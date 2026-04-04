@@ -27,7 +27,7 @@ export function SectionTitle({ title, subtitle, action }: { title: string; subti
   );
 }
 
-export function StatusBadge({ status }: { status: "online" | "offline" | "busy" | "queued" | "success" | "error" | "running" }) {
+export function StatusBadge({ status }: { status: "online" | "offline" | "busy" | "queued" | "success" | "error" | "running" | "cancelled" | "interrupted" | "sent" }) {
   const styles = {
     online: "border-emerald-400/25 bg-emerald-400/10 text-emerald-300",
     offline: "border-white/10 bg-white/5 text-white/50",
@@ -36,6 +36,9 @@ export function StatusBadge({ status }: { status: "online" | "offline" | "busy" 
     success: "border-emerald-400/25 bg-emerald-400/10 text-emerald-300",
     error: "border-rose-400/25 bg-rose-400/10 text-rose-300",
     running: "border-sky-400/25 bg-sky-400/10 text-sky-300",
+    cancelled: "border-amber-400/25 bg-amber-400/10 text-amber-300",
+    interrupted: "border-orange-400/25 bg-orange-400/10 text-orange-300",
+    sent: "border-cyan-400/25 bg-cyan-400/10 text-cyan-300",
   } as const;
 
   const labels = {
@@ -46,6 +49,9 @@ export function StatusBadge({ status }: { status: "online" | "offline" | "busy" 
     success: "success",
     error: "error",
     running: "running",
+    cancelled: "cancelled",
+    interrupted: "interrupted",
+    sent: "sent",
   } as const;
 
   return <span className={cn("inline-flex rounded-full border px-2.5 py-1 text-xs font-medium capitalize", styles[status])}>{labels[status]}</span>;

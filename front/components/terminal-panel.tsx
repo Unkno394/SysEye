@@ -3,16 +3,22 @@
 import { useEffect, useMemo, useState } from "react";
 import { CalendarRange, Play, TerminalSquare } from "lucide-react";
 import { apiJson } from "@/lib/api-client";
-import type { AgentDto, AgentTaskDto, CommandDto, PagedResult, ScenarioDetailsDto, ScenarioDto } from "@/lib/backend-types";
-import { getAgentStatus, getOsLabel, getRelativeHeartbeatLabel } from "@/lib/backend-types";
+import type { AgentDto, CommandDto, PagedResult, ScenarioDetailsDto, ScenarioDto, TaskExecutionDto, TaskStatus } from "@/lib/backend-types";
+import { getAgentStatus, getRelativeHeartbeatLabel } from "@/lib/backend-types";
+import { useClientRealtime } from "@/lib/client-realtime";
+import { buildDiagnosticComparisons, isIgnoredComparisonStatus, isSystemDiagnosticCommand } from "@/lib/diagnostics";
+import { extractPlaceholderTokens, getPlaceholderIndex, mapExecutionToHistoryItem } from "@/lib/execution-history";
 import { GlassCard, SectionTitle, StatusBadge } from "@/components/ui";
 
 type TerminalTask = {
   id: string;
   title: string;
-  status: "queued" | "running" | "success" | "error";
+  status: TaskStatus;
   createdAt: string;
-  output: string;
+  completedAt?: string | null;
+  durationSeconds?: number | null;
+  exitCode?: number | null;
+  summary: string;
   kind: "command" | "scenario";
 };
 
@@ -25,7 +31,8 @@ type PlaceholderInput = {
 
 type CommandPlatformFilter = "all" | "linux" | "windows";
 type ScenarioFilter = "all" | "ready" | "empty";
-type ActionNotice = { tone: "success" | "error"; text: string } | null;
+type HistoryStatusFilter = "all" | "sent" | "running" | "success" | "error" | "cancelled";
+type ExtendedHistoryStatusFilter = HistoryStatusFilter | "interrupted";
 
 type TerminalPanelProps = {
   agent: AgentDto;
@@ -38,52 +45,19 @@ function formatTaskTime(value: string) {
   return parsed.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
 }
 
+function formatDuration(value?: number | null) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  if (value < 1) return `${value.toFixed(2)} сек`;
+  if (value < 10) return `${value.toFixed(1)} сек`;
+  return `${Math.round(value)} сек`;
+}
+
 function resolveCommandForAgent(item: CommandDto, agent: AgentDto) {
   if (agent.os === 2) {
     return item.powerShellScript || item.bashScript || "";
   }
 
   return item.bashScript || item.powerShellScript || "";
-}
-
-function isUnavailableCommand(script: string) {
-  const normalized = script.trim().replace(/^['"]|['"]$/g, "").toLowerCase();
-  return normalized === "unavailable";
-}
-
-function getCommandAvailability(item: CommandDto, agent: AgentDto) {
-  const resolvedCommand = resolveCommandForAgent(item, agent).trim();
-
-  if (!resolvedCommand) {
-    return {
-      resolvedCommand,
-      runnable: false,
-      statusText: `Нет скрипта для ${getOsLabel(agent.os)}`,
-    };
-  }
-
-  if (isUnavailableCommand(resolvedCommand)) {
-    return {
-      resolvedCommand,
-      runnable: false,
-      statusText: `Недоступно для ${getOsLabel(agent.os)}`,
-    };
-  }
-
-  return {
-    resolvedCommand,
-    runnable: true,
-    statusText: "Готова к запуску",
-  };
-}
-
-function extractPlaceholderTokens(script: string) {
-  const matches = script.match(/\$\d+/g) ?? [];
-  return Array.from(new Set(matches)).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
-}
-
-function getPlaceholderIndex(token: string) {
-  return Number(token.replace("$", ""));
 }
 
 function matchesCommandPlatform(command: CommandDto, filter: CommandPlatformFilter) {
@@ -95,32 +69,12 @@ function matchesCommandPlatform(command: CommandDto, filter: CommandPlatformFilt
   if (filter === "linux") return hasBash;
   return hasPowerShell;
 }
-
-function getTaskOutput(task: AgentTaskDto) {
-  const combined = [task.output, task.error].filter(Boolean).join(task.output && task.error ? "\n" : "");
-  if (combined) return combined;
-
-  if (task.status === "queued") {
-    return "Команда поставлена в очередь.";
-  }
-
-  if (task.status === "running") {
-    return "Команда уже выполняется на подключённой машине.";
-  }
-
-  if (task.status === "success") {
-    return "Команда завершилась без дополнительного вывода.";
-  }
-
-  return "Команда завершилась с ошибкой без дополнительного вывода.";
-}
-
 export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
-  const [serverTasks, setServerTasks] = useState<TerminalTask[]>([]);
+  const [serverExecutions, setServerExecutions] = useState<TaskExecutionDto[]>([]);
   const [loadedScenarios, setLoadedScenarios] = useState<ScenarioDetailsDto[]>([]);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [statusFilter, setStatusFilter] = useState<"all" | "queued" | "success" | "running" | "error">("all");
-  const [draftStatusFilter, setDraftStatusFilter] = useState<"all" | "queued" | "success" | "running" | "error">("all");
+  const [statusFilter, setStatusFilter] = useState<ExtendedHistoryStatusFilter>("all");
+  const [draftStatusFilter, setDraftStatusFilter] = useState<ExtendedHistoryStatusFilter>("all");
   const [selectedDate, setSelectedDate] = useState("");
   const [draftSelectedDate, setDraftSelectedDate] = useState("");
   const [placeholderModalOpen, setPlaceholderModalOpen] = useState(false);
@@ -132,28 +86,19 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
   const [commandPlatformFilter, setCommandPlatformFilter] = useState<CommandPlatformFilter>("all");
   const [scenarioQuery, setScenarioQuery] = useState("");
   const [scenarioFilter, setScenarioFilter] = useState<ScenarioFilter>("all");
-  const [actionNotice, setActionNotice] = useState<ActionNotice>(null);
+  const [runtimeNotice, setRuntimeNotice] = useState<string | null>(null);
   const panelStatus = getAgentStatus(agent.lastHeartbeatAt);
+  const commandsById = useMemo(() => new Map(commands.map((command) => [command.id, command])), [commands]);
 
   const loadTasks = async () => {
     try {
-      const data = await apiJson<PagedResult<AgentTaskDto>>(
-        `/api/hackaton/agent/${agent.id}/tasks?take=50&skip=0`,
+      const data = await apiJson<PagedResult<TaskExecutionDto>>(
+        `/api/hackaton/task/agents/${agent.id}?take=50&skip=0`,
         { method: "GET" },
       );
-
-      setServerTasks(
-        (data.items ?? []).map((task) => ({
-          id: task.id,
-          title: task.title,
-          status: task.status,
-          createdAt: task.createdAt,
-          output: getTaskOutput(task),
-          kind: "command",
-        })),
-      );
+      setServerExecutions(data.items ?? []);
     } catch {
-      setServerTasks([]);
+      setServerExecutions([]);
     }
   };
 
@@ -197,21 +142,50 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
     void loadScenarios();
     const intervalId = window.setInterval(() => {
       void loadTasks();
-    }, 5_000);
+    }, 30_000);
 
     return () => {
       window.clearInterval(intervalId);
     };
   }, [agent.id]);
 
+  useClientRealtime(
+    {
+      onTaskQueued: ({ agentId }) => {
+        if (agentId === agent.id) {
+          void loadTasks();
+        }
+      },
+      onTaskUpdated: ({ agentId }) => {
+        if (agentId === agent.id) {
+          void loadTasks();
+        }
+      },
+    },
+    Boolean(agent.id),
+  );
+
   const tasks = useMemo(() => {
-    return [...serverTasks].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
-  }, [serverTasks]);
+    return [...serverExecutions]
+      .map((execution) => mapExecutionToHistoryItem(execution, commandsById))
+      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+  }, [commandsById, serverExecutions]);
+
+  const basicCheckCommands = useMemo(() => commands.filter(isSystemDiagnosticCommand), [commands]);
+
+  const diagnosticComparisons = useMemo(
+    () => buildDiagnosticComparisons(serverExecutions, commandsById),
+    [commandsById, serverExecutions],
+  );
 
   const visibleCommands = useMemo(() => {
     const normalizedQuery = commandQuery.trim().toLowerCase();
 
     return commands.filter((command) => {
+      if (isSystemDiagnosticCommand(command)) {
+        return false;
+      }
+
       if (!matchesCommandPlatform(command, commandPlatformFilter)) {
         return false;
       }
@@ -261,28 +235,10 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
     });
   }, [selectedDate, statusFilter, tasks]);
 
-  const queueCommandTask = async (title: string, command: string) => {
-    await apiJson<AgentTaskDto>(
-      `/api/hackaton/agent/${agent.id}/tasks/command`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          title,
-          command,
-        }),
-      },
-      "Не удалось поставить команду в очередь.",
-    );
-
-    await loadTasks();
-    setActionNotice({
-      tone: "success",
-      text: `Команда "${title}" поставлена в очередь.`,
-    });
-  };
-
   const executeTemplateCommand = async (commandId: string, values: Record<number, string>) => {
-    await apiJson<{ message: string; executionId: string }>(
+    setRuntimeNotice(null);
+
+    await apiJson<unknown>(
       `/api/hackaton/task/agents/${agent.id}/execute`,
       {
         method: "POST",
@@ -295,18 +251,19 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
     );
 
     await loadTasks();
-    setActionNotice({
-      tone: "success",
-      text: "Шаблонная команда поставлена в очередь.",
-    });
   };
 
   const handleCommandClick = (item: CommandDto) => {
     const resolvedCommand = resolveCommandForAgent(item, agent);
+    if (!resolvedCommand.trim()) {
+      setRuntimeNotice(`Для агента ${agent.name} у команды "${item.name}" нет подходящего скрипта под текущую платформу.`);
+      return;
+    }
+
     const tokens = extractPlaceholderTokens(resolvedCommand);
 
     if (!tokens.length) {
-      void queueCommandTask(item.name, resolvedCommand || "");
+      void executeTemplateCommand(item.id, {});
       return;
     }
 
@@ -345,62 +302,7 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
   };
 
   const handleScenarioClick = (scenarioId: string) => {
-    void (async () => {
-      await apiJson<AgentTaskDto[]>(
-        `/api/hackaton/agent/${agent.id}/tasks/scenario/${scenarioId}`,
-        { method: "POST" },
-        "Не удалось поставить сценарий в очередь.",
-      );
-
-      await loadTasks();
-    })();
-  };
-
-  const handleCommandCardClick = (item: CommandDto) => {
-    const availability = getCommandAvailability(item, agent);
-    const resolvedCommand = availability.resolvedCommand;
-    if (extractPlaceholderTokens(resolvedCommand).length > 0) {
-      handleCommandClick(item);
-      return;
-    }
-
-    if (!availability.runnable) {
-      setActionNotice({
-        tone: "error",
-        text: `Команда "${item.name}" ${availability.statusText.toLowerCase()}.`,
-      });
-      return;
-    }
-
-    void queueCommandTask(item.name, resolvedCommand).catch((error) => {
-      setActionNotice({
-        tone: "error",
-        text: error instanceof Error ? error.message : "Не удалось поставить команду в очередь.",
-      });
-    });
-  };
-
-  const handleScenarioCardClick = (scenarioId: string) => {
-    void (async () => {
-      try {
-        const tasks = await apiJson<AgentTaskDto[]>(
-          `/api/hackaton/agent/${agent.id}/tasks/scenario/${scenarioId}`,
-          { method: "POST" },
-          "Не удалось поставить сценарий в очередь.",
-        );
-
-        await loadTasks();
-        setActionNotice({
-          tone: "success",
-          text: `Сценарий поставлен в очередь${tasks?.length ? `: ${tasks.length} команд` : ""}.`,
-        });
-      } catch (error) {
-        setActionNotice({
-          tone: "error",
-          text: error instanceof Error ? error.message : "Не удалось поставить сценарий в очередь.",
-        });
-      }
-    })();
+    setRuntimeNotice("Новый backend пока не запускает сценарии напрямую на агенте. Их можно редактировать, но запуск для этой модели ещё не добавлен.");
   };
 
   const handleSubmitPlaceholderCommand = () => {
@@ -422,7 +324,7 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
         setPlaceholderInputs([]);
         setPlaceholderError(null);
       } catch (error) {
-        setPlaceholderError(error instanceof Error ? error.message : "Не удалось поставить команду в очередь.");
+        setPlaceholderError(error instanceof Error ? error.message : "Не удалось запустить команду.");
       }
     })();
   };
@@ -432,7 +334,7 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
       <div className="border-b border-line px-4 py-4 sm:px-5">
         <SectionTitle
           title="Запуск команд"
-          subtitle="Команды, сценарии и история запусков."
+          subtitle="Сохранённые команды, библиотека сценариев и история выполнений нового backend."
           action={
             <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-xs uppercase tracking-[0.18em] text-white/60">
               <StatusBadge status={panelStatus} />
@@ -440,20 +342,102 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
             </div>
           }
         />
-        {actionNotice ? (
-          <div
-            className={`mt-3 rounded-2xl border px-4 py-3 text-sm ${
-              actionNotice.tone === "success"
-                ? "border-accent/20 bg-accent/10 text-accent"
-                : "border-rose-400/20 bg-rose-400/10 text-rose-100/90"
-            }`}
-          >
-            {actionNotice.text}
+        {runtimeNotice ? (
+          <div className="rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm text-amber-100/90">
+            {runtimeNotice}
           </div>
         ) : null}
       </div>
       <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="min-h-[420px] bg-[#03090d] p-3 text-sm sm:p-5">
+          <div className="mb-4 rounded-2xl border border-white/8 bg-white/[0.03] p-3">
+            <div className="rounded-xl border border-accent/30 bg-accent/12 px-3 py-2 text-xs uppercase tracking-[0.18em] text-accent">
+              Базовые проверки
+            </div>
+            <div className="mt-2 text-xs leading-5 text-white/50">
+              Готовые системные снимки машины. В сравнение попадают только два последних успешных запуска, а прерванные и отменённые команды автоматически исключаются.
+            </div>
+
+            <div className="terminal-scroll mt-3 flex gap-3 overflow-x-auto pb-1">
+              {basicCheckCommands.map((item) => {
+                const resolvedCommand = resolveCommandForAgent(item, agent);
+                const hasPlaceholders = extractPlaceholderTokens(resolvedCommand).length > 0;
+
+                return (
+                  <button
+                    key={`diagnostic-${item.id}`}
+                    type="button"
+                    onClick={() => handleCommandClick(item)}
+                    className="w-[280px] shrink-0 rounded-2xl border border-white/8 bg-black/20 p-3 text-left transition hover:border-line hover:bg-white/[0.04] sm:w-[300px]"
+                  >
+                    <div className="break-words font-medium text-white">{item.name}</div>
+                    <div className="mt-2 text-xs text-white/50">{item.description || "Описание не задано."}</div>
+                    <div className="mt-3 overflow-hidden rounded-xl border border-white/8 bg-[#041016] px-3 py-2 font-mono text-xs text-[#9af7c8] break-words">
+                      {resolvedCommand || "Скрипт не задан"}
+                    </div>
+                    <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <span className="text-xs text-white/40">{hasPlaceholders ? "Нужны параметры перед запуском" : "Снимок готов к запуску"}</span>
+                      <span className="inline-flex items-center gap-1 text-xs text-accent">
+                        <Play size={12} />
+                        Запустить
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-4 grid gap-3 xl:grid-cols-2">
+              {diagnosticComparisons.map((comparison) => {
+                const latestStatus = comparison.latestAttemptStatus ?? comparison.latestSuccessfulRun?.status ?? "sent";
+                const summary = comparison.latestSuccessfulRun?.resultSummary?.trim() || "Снимок пока не собран.";
+
+                return (
+                  <div key={`comparison-${comparison.command.id}`} className="rounded-2xl border border-white/8 bg-black/20 p-4">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <div className="font-medium text-white">{comparison.command.name}</div>
+                        <div className="mt-1 text-xs text-white/45">
+                          Последняя попытка: {comparison.latestAttemptAt ? formatTaskTime(comparison.latestAttemptAt) : "ещё не запускалась"}
+                        </div>
+                      </div>
+                      <StatusBadge status={latestStatus} />
+                    </div>
+
+                    <div className="mt-3 rounded-2xl border border-white/8 bg-[#081018] p-3 text-sm text-white/80">
+                      {summary}
+                    </div>
+
+                    <div className="mt-3 text-xs text-white/55">
+                      {comparison.comparisonState === "unchanged" ? "Без изменений относительно предыдущего успешного снимка." : null}
+                      {comparison.comparisonState === "changed" ? "Есть изменения относительно предыдущего успешного снимка." : null}
+                      {comparison.comparisonState === "no-baseline" ? "Есть только один успешный снимок. Сравнение появится после следующего удачного запуска." : null}
+                      {comparison.comparisonState === "no-data" ? "У этой проверки пока нет успешного снимка." : null}
+                    </div>
+
+                    {isIgnoredComparisonStatus(comparison.latestAttemptStatus) ? (
+                      <div className="mt-3 rounded-2xl border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-100/90">
+                        Последний запуск был прерван и исключён из сравнения.
+                      </div>
+                    ) : null}
+
+                    {comparison.addedLines.length ? (
+                      <div className="mt-3 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 px-3 py-2 text-xs text-emerald-100/90">
+                        + {comparison.addedLines.join(" · ")}
+                      </div>
+                    ) : null}
+
+                    {comparison.removedLines.length ? (
+                      <div className="mt-3 rounded-2xl border border-rose-400/20 bg-rose-400/10 px-3 py-2 text-xs text-rose-100/90">
+                        - {comparison.removedLines.join(" · ")}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
           <div className="mb-4 rounded-2xl border border-white/8 bg-white/[0.03] p-3">
             <div className="flex items-center gap-2 rounded-xl border border-accent/30 bg-accent/12 px-3 py-2 text-xs uppercase tracking-[0.18em] text-accent">
               <TerminalSquare size={14} />
@@ -492,17 +476,16 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
 
             <div className="terminal-scroll mt-3 flex gap-3 overflow-x-auto pb-1">
               {visibleCommands.map((item) => {
-                const availability = getCommandAvailability(item, agent);
-                const resolvedCommand = availability.resolvedCommand;
+                const resolvedCommand = resolveCommandForAgent(item, agent);
                 const hasPlaceholders = extractPlaceholderTokens(resolvedCommand).length > 0;
-                const isRunnable = availability.runnable;
+                const isRunnable = Boolean(resolvedCommand.trim());
 
                 return (
                   <button
                     key={item.id}
                     type="button"
                     disabled={!isRunnable}
-                    onClick={() => handleCommandCardClick(item)}
+                    onClick={() => handleCommandClick(item)}
                     className={`w-[280px] shrink-0 rounded-2xl border p-3 text-left transition sm:w-[300px] ${
                       isRunnable
                         ? "border-white/8 bg-black/20 hover:border-line hover:bg-white/[0.04]"
@@ -520,7 +503,9 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
                       {resolvedCommand || "Скрипт не задан"}
                     </div>
                     <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                      <span className="text-xs text-white/40">{isRunnable ? (hasPlaceholders ? "Нужны параметры перед запуском" : availability.statusText) : availability.statusText}</span>
+                      <span className="text-xs text-white/40">
+                        {isRunnable ? (hasPlaceholders ? "Нужны параметры перед запуском" : "Готова к запуску") : "Нет скрипта под текущую платформу"}
+                      </span>
                       <span className={`inline-flex items-center gap-1 text-xs ${isRunnable ? "text-accent" : "text-white/30"}`}>
                         <Play size={12} />
                         {isRunnable ? "Запустить" : "Недоступно"}
@@ -576,8 +561,8 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
                 <button
                   key={scenario.id}
                   type="button"
-                  onClick={() => handleScenarioCardClick(scenario.id)}
-                  className="w-[280px] shrink-0 rounded-2xl border border-white/8 bg-black/20 p-3 text-left transition hover:border-line hover:bg-white/[0.04] sm:w-[300px]"
+                  onClick={() => handleScenarioClick(scenario.id)}
+                  className="w-[280px] shrink-0 rounded-2xl border border-white/8 bg-black/20 p-3 text-left transition hover:border-amber-400/20 hover:bg-white/[0.04] sm:w-[300px]"
                 >
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <div className="break-words font-medium text-white">{scenario.name}</div>
@@ -593,9 +578,9 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
                       </div>
                     ))}
                   </div>
-                  <div className="mt-3 inline-flex items-center gap-1 text-xs text-accent">
+                  <div className="mt-3 inline-flex items-center gap-1 text-xs text-amber-200">
                     <Play size={12} />
-                    Запустить сценарий
+                    Пока без запуска
                   </div>
                 </button>
               ))}
@@ -636,14 +621,24 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div className="min-w-0">
                       <div className="font-medium text-white">{task.title}</div>
-                      <div className="mt-1 text-xs text-white/45">
-                        {formatTaskTime(task.createdAt)} · {task.kind === "scenario" ? "Сценарий" : "Команда"}
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-white/45">
+                        <span>{formatTaskTime(task.createdAt)} · Команда</span>
+                        {task.durationSeconds != null ? (
+                          <span className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-white/45">
+                            {formatDuration(task.durationSeconds)}
+                          </span>
+                        ) : null}
+                        {task.exitCode != null ? (
+                          <span className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-white/45">
+                            exit {task.exitCode}
+                          </span>
+                        ) : null}
                       </div>
                     </div>
                     <StatusBadge status={task.status} />
                   </div>
-                  <div className="mt-3 rounded-2xl border border-white/8 bg-[#081018] p-3 font-mono text-xs text-[#9af7c8] break-words whitespace-pre-wrap">
-                    {task.output}
+                  <div className="mt-3 rounded-2xl border border-white/8 bg-[#081018] p-3 text-sm text-white/80 break-words whitespace-pre-wrap">
+                    {task.summary}
                   </div>
                 </div>
               ))}
@@ -767,20 +762,22 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
                 />
               </div>
 
-              <div>
-                <div className="mb-2 text-sm text-white/60">Статус</div>
+                <div>
+                  <div className="mb-2 text-sm text-white/60">Статус</div>
                 <div className="flex flex-wrap gap-2">
                     {[
                       { value: "all", label: "Все" },
-                      { value: "queued", label: "В очереди" },
-                      { value: "success", label: "Успех" },
+                      { value: "sent", label: "Отправлена" },
                       { value: "running", label: "В работе" },
+                      { value: "success", label: "Успех" },
                       { value: "error", label: "Ошибка" },
+                      { value: "cancelled", label: "Отменена" },
+                      { value: "interrupted", label: "Прервана" },
                     ].map((item) => (
                     <button
                       key={item.value}
                       type="button"
-                      onClick={() => setDraftStatusFilter(item.value as "all" | "queued" | "success" | "running" | "error")}
+                      onClick={() => setDraftStatusFilter(item.value as ExtendedHistoryStatusFilter)}
                       className={`rounded-full border px-3 py-1.5 text-xs transition ${
                         draftStatusFilter === item.value
                           ? "border-accent/30 bg-accent/12 text-accent"

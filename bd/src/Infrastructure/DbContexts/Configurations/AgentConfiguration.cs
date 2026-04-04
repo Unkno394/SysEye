@@ -25,14 +25,14 @@ public class AgentConfiguration : IEntityTypeConfiguration<Agent>
             .HasMaxLength(100)
             .HasColumnType("varchar(100)");
 
-        builder.Property(x => x.IpAddress)
-            .HasMaxLength(128)
-            .HasColumnType("varchar(128)");
-
-        builder.Property(x => x.Port)
+        builder.Property(x => x.Os)
             .HasColumnType("integer");
 
-        builder.Property(x => x.Os)
+        builder.Property(x => x.IpAddress)
+            .HasMaxLength(64)
+            .HasColumnType("varchar(64)");
+
+        builder.Property(x => x.Port)
             .HasColumnType("integer");
 
         builder.Property(x => x.Distribution)

@@ -14,7 +14,7 @@ public class AgentCommandDispatcher(
         AgentCommandDto command,
         CancellationToken cancellationToken = default)
     {
-        var groupName = AgentHub.GetAgentGroupName(agentId);
+        var groupName = $"agent-{agentId}";
 
         logger.LogInformation(
             "Отправка команды AgentId: {AgentId}, Группа: {GroupName}",

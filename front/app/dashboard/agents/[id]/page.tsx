@@ -19,6 +19,7 @@ import {
 } from "@/lib/agent-launch";
 import type { AgentConnectionTokenDto, AgentDto, CommandDto } from "@/lib/backend-types";
 import { getAgentStatus, getDistributionKey, getOsLabel, getRelativeHeartbeatLabel } from "@/lib/backend-types";
+import { useClientRealtime } from "@/lib/client-realtime";
 
 export default function AgentDetailsPage() {
   const params = useParams<{ id: string }>();
@@ -79,7 +80,7 @@ export default function AgentDetailsPage() {
 
     const intervalId = window.setInterval(() => {
       void loadData(true);
-    }, 10_000);
+    }, 60_000);
 
     return () => {
       window.clearInterval(intervalId);
@@ -89,6 +90,27 @@ export default function AgentDetailsPage() {
   useEffect(() => {
     setAgentServerUrl(inferAgentServerUrl());
   }, []);
+
+  useClientRealtime(
+    {
+      onAgentUpdated: (updatedAgent) => {
+        if (updatedAgent.id !== agentId) {
+          return;
+        }
+
+        setAgent(updatedAgent);
+      },
+      onAgentDeleted: ({ agentId: deletedAgentId }) => {
+        if (deletedAgentId !== agentId) {
+          return;
+        }
+
+        router.push("/dashboard");
+        router.refresh();
+      },
+    },
+    Boolean(agentId),
+  );
 
   const status = useMemo(() => (agent ? getAgentStatus(agent.lastHeartbeatAt) : "offline"), [agent]);
   const reconnectCommand = useMemo(() => {
@@ -115,6 +137,8 @@ export default function AgentDetailsPage() {
     if (!reconnectToken) return "";
     return buildLinuxServiceGenerateCommand(agentServerUrl, reconnectToken);
   }, [agentServerUrl, reconnectToken]);
+  const showLinuxReconnectHelp = Boolean(reconnectOpen && reconnectToken && reconnectPlatform === "linux");
+  const showWindowsReconnectHelp = Boolean(reconnectOpen && reconnectToken && reconnectPlatform === "windows");
 
   const handleSave = async () => {
     if (!agent) return;
@@ -360,7 +384,7 @@ export default function AgentDetailsPage() {
       ) : null}
       <TerminalPanel agent={agent} commands={commands} />
 
-      {reconnectPlatform === "linux" && reconnectOpen && reconnectToken ? (
+      {showLinuxReconnectHelp ? (
         <div className="fixed inset-0 z-40 overflow-y-auto bg-[#02070bcc]/80 p-3 backdrop-blur-sm sm:p-4">
           <div className="flex min-h-full items-start justify-center py-3 sm:items-center">
             <div className="w-full max-w-2xl rounded-[1.6rem] border border-white/10 bg-[#101821]/95 p-4 shadow-[0_24px_80px_rgba(0,0,0,0.45)] sm:rounded-[1.9rem] sm:p-6">
@@ -474,7 +498,7 @@ export default function AgentDetailsPage() {
         </div>
       ) : null}
 
-      {reconnectPlatform === "windows" && reconnectOpen && reconnectToken ? (
+      {showWindowsReconnectHelp ? (
         <div className="fixed inset-0 z-40 overflow-y-auto bg-[#02070bcc]/80 p-3 backdrop-blur-sm sm:p-4">
           <div className="flex min-h-full items-start justify-center py-3 sm:items-center">
             <div className="w-full max-w-2xl rounded-[1.6rem] border border-white/10 bg-[#101821]/95 p-4 shadow-[0_24px_80px_rgba(0,0,0,0.45)] sm:rounded-[1.9rem] sm:p-6">

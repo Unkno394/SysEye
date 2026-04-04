@@ -1,7 +1,7 @@
 export type Role = 0 | 1 | 2;
 export type OsType = 0 | 1 | 2;
 export type AgentStatus = "online" | "offline";
-export type TaskStatus = "queued" | "running" | "success" | "error";
+export type TaskStatus = "queued" | "running" | "success" | "error" | "cancelled" | "interrupted" | "sent";
 
 export type PagedResult<T> = {
   items: T[];
@@ -49,6 +49,8 @@ export type ApiKeyDto = {
 };
 
 export type AgentConnectionTokenDto = {
+  agentId: string;
+  name: string;
   token: string;
 };
 
@@ -60,6 +62,31 @@ export type AgentTaskDto = {
   error: string;
   exitCode?: number | null;
   createdAt: string;
+};
+
+export type TaskExecutionDto = {
+  id: string;
+  commandId: string;
+  agentId: string;
+  title?: string;
+  startedAt: string;
+  status: TaskStatus;
+  completedAt?: string | null;
+  durationSeconds?: number | null;
+  exitCode?: number | null;
+  resultSummary: string;
+  rawOutput?: string;
+  rawError?: string;
+};
+
+export type ExecutionLogDto = {
+  executionId?: string | null;
+  message: string;
+  level?: string | null;
+  timestamp: string;
+  durationSeckonds?: number;
+  commandId?: string | null;
+  category?: string | null;
 };
 
 export type AgentMetricsPointDto = {
@@ -82,6 +109,23 @@ export type AgentMetricsDto = {
   averageDurationSeconds: number;
   successRate: number;
   activity: AgentMetricsPointDto[];
+};
+
+export type AgentRatingDto = {
+  rank: number;
+  agentId: string;
+  agentName: string;
+  ipAddress?: string | null;
+  os?: OsType | null;
+  distribution?: string | null;
+  lastHeartbeatAt: string;
+  totalRuns: number;
+  errorsToday: number;
+  averageDurationSeconds: number;
+  successRate: number;
+  stabilityScore: number;
+  speedScore: number;
+  overallScore: number;
 };
 
 export type ScenarioDto = {

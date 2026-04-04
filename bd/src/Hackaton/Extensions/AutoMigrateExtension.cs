@@ -1,4 +1,5 @@
-using Hackaton;
+﻿using Hackaton;
+using Infrastructure.DbContexts;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -91,16 +92,134 @@ public static class AutoMigrateExtension
 
     private static void ApplyCompatibilityPatches(DbContext dbContext)
     {
-        dbContext.Database.ExecuteSqlRaw("""
+        if (dbContext is not AppDbContext appDbContext)
+            return;
+
+        EnsureAgentColumns(appDbContext);
+        EnsureAgentTaskColumns(appDbContext);
+        EnsureTaskExecutionSummaryColumns(appDbContext);
+        EnsureCommandColumns(appDbContext);
+        EnsureScenarioTables(appDbContext);
+        EnsureLegacyCompatibility(appDbContext);
+    }
+
+    private static void EnsureTaskExecutionSummaryColumns(AppDbContext dbContext)
+    {
+        const string sql = """
+            ALTER TABLE IF EXISTS hackaton.task_executions
+            ADD COLUMN IF NOT EXISTS "Status" text NOT NULL DEFAULT 'sent';
+
+            ALTER TABLE IF EXISTS hackaton.task_executions
+            ADD COLUMN IF NOT EXISTS "CompletedAt" timestamptz NULL;
+
+            ALTER TABLE IF EXISTS hackaton.task_executions
+            ADD COLUMN IF NOT EXISTS "DurationSeconds" double precision NULL;
+
+            ALTER TABLE IF EXISTS hackaton.task_executions
+            ADD COLUMN IF NOT EXISTS "ExitCode" integer NULL;
+
+            ALTER TABLE IF EXISTS hackaton.task_executions
+            ADD COLUMN IF NOT EXISTS "ResultSummary" text NOT NULL DEFAULT '';
+            """;
+
+        dbContext.Database.ExecuteSqlRaw(sql);
+    }
+
+    private static void EnsureAgentColumns(AppDbContext dbContext)
+    {
+        const string sql = """
+            ALTER TABLE IF EXISTS hackaton.agents
+            ADD COLUMN IF NOT EXISTS "IpAddress" varchar(64) NULL;
+
+            ALTER TABLE IF EXISTS hackaton.agents
+            ADD COLUMN IF NOT EXISTS "Port" integer NULL;
+
+            ALTER TABLE IF EXISTS hackaton.agents
+            ADD COLUMN IF NOT EXISTS "Distribution" varchar(128) NULL;
+            """;
+
+        dbContext.Database.ExecuteSqlRaw(sql);
+    }
+
+    private static void EnsureAgentTaskColumns(AppDbContext dbContext)
+    {
+        const string sql = """
+            ALTER TABLE IF EXISTS hackaton.agent_tasks
+            ADD COLUMN IF NOT EXISTS "CommandId" uuid NULL;
+
+            CREATE INDEX IF NOT EXISTS "IX_agent_tasks_CommandId"
+                ON hackaton.agent_tasks ("CommandId");
+            """;
+
+        dbContext.Database.ExecuteSqlRaw(sql);
+    }
+
+    private static void EnsureCommandColumns(AppDbContext dbContext)
+    {
+        const string sql = """
             ALTER TABLE IF EXISTS hackaton.commands
-            ADD COLUMN IF NOT EXISTS "IsDeleted" boolean NOT NULL DEFAULT false;
-            """);
+            ADD COLUMN IF NOT EXISTS "LogRegex" text NULL;
 
-        dbContext.Database.ExecuteSqlRaw("""
+            ALTER TABLE IF EXISTS hackaton.commands
+            ADD COLUMN IF NOT EXISTS "IsSystem" boolean NOT NULL DEFAULT FALSE;
+            """;
+
+        dbContext.Database.ExecuteSqlRaw(sql);
+    }
+
+    private static void EnsureScenarioTables(AppDbContext dbContext)
+    {
+        const string sql = """
+            CREATE TABLE IF NOT EXISTS hackaton."Scenarios"
+            (
+                "Id" uuid NOT NULL,
+                "UserId" uuid NOT NULL,
+                "Name" character varying(200) NOT NULL,
+                "Description" character varying(2000) NOT NULL,
+                "IsDeleted" boolean NOT NULL DEFAULT FALSE,
+                "IsSystem" boolean NOT NULL DEFAULT FALSE,
+                CONSTRAINT "PK_Scenarios" PRIMARY KEY ("Id"),
+                CONSTRAINT "FK_Scenarios_Users_UserId" FOREIGN KEY ("UserId")
+                    REFERENCES hackaton.users ("Id") MATCH SIMPLE
+                    ON UPDATE NO ACTION
+                    ON DELETE RESTRICT
+            );
+
             ALTER TABLE IF EXISTS hackaton."Scenarios"
-            ADD COLUMN IF NOT EXISTS "IsSystem" boolean NOT NULL DEFAULT false;
-            """);
+            ADD COLUMN IF NOT EXISTS "IsSystem" boolean NOT NULL DEFAULT FALSE;
 
+            CREATE INDEX IF NOT EXISTS "IX_Scenarios_UserId_Name"
+                ON hackaton."Scenarios" ("UserId", "Name");
+
+            CREATE TABLE IF NOT EXISTS hackaton."ScenarioCommands"
+            (
+                "Id" uuid NOT NULL,
+                "ScenarioId" uuid NOT NULL,
+                "CommandId" uuid NOT NULL,
+                "Order" integer NOT NULL,
+                CONSTRAINT "PK_ScenarioCommands" PRIMARY KEY ("Id"),
+                CONSTRAINT "FK_ScenarioCommands_Commands_CommandId" FOREIGN KEY ("CommandId")
+                    REFERENCES hackaton.commands ("Id") MATCH SIMPLE
+                    ON UPDATE NO ACTION
+                    ON DELETE RESTRICT,
+                CONSTRAINT "FK_ScenarioCommands_Scenarios_ScenarioId" FOREIGN KEY ("ScenarioId")
+                    REFERENCES hackaton."Scenarios" ("Id") MATCH SIMPLE
+                    ON UPDATE NO ACTION
+                    ON DELETE CASCADE
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS "IX_ScenarioCommands_ScenarioId_CommandId"
+                ON hackaton."ScenarioCommands" ("ScenarioId", "CommandId");
+
+            CREATE INDEX IF NOT EXISTS "IX_ScenarioCommands_ScenarioId_Order"
+                ON hackaton."ScenarioCommands" ("ScenarioId", "Order");
+            """;
+
+        dbContext.Database.ExecuteSqlRaw(sql);
+    }
+
+    private static void EnsureLegacyCompatibility(AppDbContext dbContext)
+    {
         dbContext.Database.ExecuteSqlRaw("""
             DO $$
             BEGIN

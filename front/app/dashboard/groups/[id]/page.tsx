@@ -10,7 +10,8 @@ import { apiJson } from "@/lib/api-client";
 import { loadAllCommands } from "@/lib/commands";
 import { getAgentGroup, subscribeToAgentGroups, type AgentGroup } from "@/lib/agent-groups";
 import type { AgentDto, CommandDto, PagedResult } from "@/lib/backend-types";
-import { getAgentStatus, getRelativeHeartbeatLabel } from "@/lib/backend-types";
+import { getAgentStatus, getDistributionLabel, getRelativeHeartbeatLabel } from "@/lib/backend-types";
+import { useClientRealtime } from "@/lib/client-realtime";
 
 export default function AgentGroupDetailsPage() {
   const params = useParams<{ id: string }>();
@@ -78,6 +79,30 @@ export default function AgentGroupDetailsPage() {
       window.clearInterval(intervalId);
     };
   }, [groupId]);
+
+  useClientRealtime(
+    {
+      onAgentUpdated: (updatedAgent) => {
+        setAgents((current) => {
+          const existingIndex = current.findIndex((agent) => agent.id === updatedAgent.id);
+          if (existingIndex === -1) {
+            return [updatedAgent, ...current].sort(
+              (left, right) => new Date(right.lastHeartbeatAt).getTime() - new Date(left.lastHeartbeatAt).getTime(),
+            );
+          }
+
+          const nextAgents = [...current];
+          nextAgents[existingIndex] = updatedAgent;
+          nextAgents.sort((left, right) => new Date(right.lastHeartbeatAt).getTime() - new Date(left.lastHeartbeatAt).getTime());
+          return nextAgents;
+        });
+      },
+      onAgentDeleted: ({ agentId }) => {
+        setAgents((current) => current.filter((agent) => agent.id !== agentId));
+      },
+    },
+    Boolean(groupId),
+  );
 
   const selectedAgents = useMemo(() => {
     if (!group) return [];
@@ -190,7 +215,9 @@ export default function AgentGroupDetailsPage() {
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="font-medium text-white">{agent.name}</div>
-                    <div className="mt-1 text-sm text-white/50">{agent.ipAddress || "IP пока нет"}</div>
+                    <div className="mt-1 text-sm text-white/50">
+                      {[getDistributionLabel(agent.distribution, agent.os), agent.ipAddress || null].filter(Boolean).join(" · ") || "Параметры машины появятся после подключения."}
+                    </div>
                   </div>
                   <StatusBadge status={getAgentStatus(agent.lastHeartbeatAt)} />
                 </div>

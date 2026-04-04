@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import platform
+import signal
 import subprocess
 import threading
 from typing import Callable
@@ -8,6 +10,9 @@ from typing import Callable
 
 class CommandExecutor:
     def __init__(self):
+        self._lock = threading.RLock()
+        self._processes: dict[str, subprocess.Popen[str]] = {}
+        self._cancelled_task_ids: set[str] = set()
         self.allowed_commands = {
             "get_hostname": {
                 "windows": "hostname",
@@ -60,6 +65,17 @@ class CommandExecutor:
 
         return self.allowed_commands[task_type].get(os_name)
 
+    def cancel(self, task_id: str) -> bool:
+        with self._lock:
+            process = self._processes.get(task_id)
+            if process is None:
+                return False
+
+            self._cancelled_task_ids.add(task_id)
+
+        self._terminate_process(process)
+        return True
+
     def execute(
         self,
         command: str,
@@ -87,14 +103,16 @@ class CommandExecutor:
                     process.stdin.write(self._build_windows_script(command))
                     process.stdin.close()
             else:
-                process = subprocess.Popen(
-                    command,
-                    shell=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    bufsize=1,
-                )
+                popen_kwargs = {
+                    "args": command,
+                    "shell": True,
+                    "stdout": subprocess.PIPE,
+                    "stderr": subprocess.PIPE,
+                    "text": True,
+                    "bufsize": 1,
+                }
+                popen_kwargs["start_new_session"] = True
+                process = subprocess.Popen(**popen_kwargs)
         except Exception as exc:
             return {
                 "status": "error",
@@ -102,6 +120,10 @@ class CommandExecutor:
                 "stderr": str(exc),
                 "exitCode": -1,
             }
+
+        with self._lock:
+            self._processes[task_id] = process
+            self._cancelled_task_ids.discard(task_id)
 
         def consume(stream, collector: list[str], prefix: str = "") -> None:
             if stream is None:
@@ -125,19 +147,39 @@ class CommandExecutor:
         try:
             return_code = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            process.kill()
+            self._terminate_process(process, force=True)
             stdout_thread.join(timeout=1)
             stderr_thread.join(timeout=1)
+            self._clear_current_task(task_id)
 
             return {
-                "status": "error",
+                "status": "interrupted",
                 "stdout": "\n".join(stdout_lines),
-                "stderr": "command timed out",
-                "exitCode": -1,
+                "stderr": "command interrupted by timeout",
+                "exitCode": -3,
             }
 
         stdout_thread.join(timeout=1)
         stderr_thread.join(timeout=1)
+
+        was_cancelled = self._was_cancelled(task_id)
+        self._clear_current_task(task_id)
+
+        if was_cancelled:
+            return {
+                "status": "cancelled",
+                "stdout": "\n".join(stdout_lines),
+                "stderr": "command cancelled by user",
+                "exitCode": -2,
+            }
+
+        if return_code < 0:
+            return {
+                "status": "interrupted",
+                "stdout": "\n".join(stdout_lines),
+                "stderr": "\n".join(stderr_lines) or f"command interrupted by signal {abs(return_code)}",
+                "exitCode": return_code,
+            }
 
         return {
             "status": "success" if return_code == 0 else "error",
@@ -145,3 +187,35 @@ class CommandExecutor:
             "stderr": "\n".join(stderr_lines),
             "exitCode": return_code,
         }
+
+    def _was_cancelled(self, task_id: str) -> bool:
+        with self._lock:
+            return task_id in self._cancelled_task_ids
+
+    def _clear_current_task(self, task_id: str) -> None:
+        with self._lock:
+            self._processes.pop(task_id, None)
+            self._cancelled_task_ids.discard(task_id)
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[str], force: bool = False) -> None:
+        if process.poll() is not None:
+            return
+
+        try:
+            if os.name == "nt":
+                if force:
+                    process.kill()
+                else:
+                    process.terminate()
+            else:
+                sig = signal.SIGKILL if force else signal.SIGTERM
+                os.killpg(os.getpgid(process.pid), sig)
+        except Exception:
+            try:
+                if force:
+                    process.kill()
+                else:
+                    process.terminate()
+            except Exception:
+                pass

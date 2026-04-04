@@ -16,6 +16,7 @@ DEFAULT_INSTANCE_LOCK_FILE = APP_DIR / "agent.lock"
 class ResolvedAgentToken:
     api_key: str
     agent_id: str | None = None
+    name: str | None = None
 
 
 @dataclass
@@ -26,6 +27,10 @@ class AgentConfig:
     heartbeat_interval: int = 10
     request_timeout: int = 15
     command_timeout: int = 60
+    transient_task_retries: int = 1
+    transient_task_retry_delay: int = 2
+    result_retry_attempts: int = 3
+    max_parallel_tasks: int = 3
     state_file: str = field(default_factory=lambda: str(DEFAULT_STATE_FILE))
     instance_lock_file: str = field(default_factory=lambda: str(DEFAULT_INSTANCE_LOCK_FILE))
 
@@ -45,9 +50,14 @@ def resolve_agent_token(raw_token: str) -> ResolvedAgentToken:
 
         api_key = payload.get("apiKey")
         agent_id = payload.get("agentId")
+        name = payload.get("name")
 
         if isinstance(api_key, str) and api_key.strip():
-            return ResolvedAgentToken(api_key=api_key.strip(), agent_id=agent_id)
+            return ResolvedAgentToken(
+                api_key=api_key.strip(),
+                agent_id=agent_id if isinstance(agent_id, str) and agent_id.strip() else None,
+                name=name.strip() if isinstance(name, str) and name.strip() else None,
+            )
     except Exception:
         pass
 

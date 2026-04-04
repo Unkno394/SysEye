@@ -39,6 +39,14 @@ namespace Web.Extensions
                 .Bind(configuration.GetSection("EmailTemplateOptions"))
                 .ValidateOnStart();
 
+            services.AddOptions<LokiOptions>()
+                .Bind(configuration.GetSection("LokiOptions"))
+                .ValidateOnStart();
+
+            services.AddOptions<OpenTelemetryOptions>()
+                .Bind(configuration.GetSection("OpenTelemetryOptions"))
+                .ValidateOnStart();
+
             services.AddOptions<LoggingOptions>()
                 .Bind(configuration.GetSection("LoggingOptions"))
                 .ValidateOnStart();
@@ -74,6 +82,8 @@ namespace Web.Extensions
 
         public static IHostApplicationBuilder ValidateOptions(this IHostApplicationBuilder builder)
         {
+            builder.Services.AddSingleton<IValidateOptions<OpenTelemetryOptions>, OpenTelemetryOptionsValidator>();
+            builder.Services.AddSingleton<IValidateOptions<LokiOptions>, LokiOptionsValidator>();
             builder.Services.AddSingleton<IValidateOptions<ApiKeyOptions>, ApiKeyOptionsValidator>();
             builder.Services.AddSingleton<IValidateOptions<JwtOptions>, JwtOptionsValidator>();
             builder.Services.AddSingleton<IValidateOptions<SmtpOptions>, SmtpOptionsValidator>();

@@ -23,6 +23,7 @@ async function proxyToHackaton(request: NextRequest, path: string[]) {
   const responseHeaders = new Headers();
   const contentType = backendResponse.headers.get("content-type");
   if (contentType) responseHeaders.set("content-type", contentType);
+  responseHeaders.set("cache-control", "no-store");
 
   const location = backendResponse.headers.get("location");
   if (location) responseHeaders.set("location", location);

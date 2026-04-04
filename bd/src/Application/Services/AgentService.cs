@@ -7,22 +7,24 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Application.Services;
 
-public class AgentService(AppDbContext context, IRealtimeNotifier realtimeNotifier) : IAgentService
+public class AgentService(
+    AppDbContext context,
+    IRealtimeNotifier realtimeNotifier) : IAgentService
 {
     private static readonly TimeSpan ManualStatusRefreshWindow = TimeSpan.FromSeconds(45);
 
     private static readonly Func<AppDbContext, Guid, Guid, IQueryable<Agent>> _getAgentQuery = (ctx, agentId, userId) =>
         ctx.Agents.Where(a => a.Id == agentId && a.UserId == userId && !a.IsDeleted);
 
-    private static AgentDto MapAgentDto(Agent agent) => new()
+    private static readonly Func<Agent, AgentDto> _mapAgent = agent => new AgentDto
     {
         Id = agent.Id,
-        IpAddress = agent.IpAddress,
         Os = agent.Os,
+        IpAddress = agent.IpAddress,
+        Port = agent.Port,
         Distribution = agent.Distribution,
         LastHeartbeatAt = agent.LastHeartbeatAt,
         Name = agent.Name,
-        Port = agent.Port,
     };
 
     public async Task<Agent> Create(
@@ -39,12 +41,12 @@ public class AgentService(AppDbContext context, IRealtimeNotifier realtimeNotifi
             Name = name.Trim(),
             Os = os,
             UserId = userId,
-            LastHeartbeatAt = DateTime.UtcNow
+            LastHeartbeatAt = DateTime.UtcNow.AddMinutes(-1)
         };
 
         context.Agents.Add(agent);
         await context.SaveChangesAsync(ct);
-        await realtimeNotifier.NotifyAgentUpdatedAsync(userId, MapAgentDto(agent), ct);
+        await realtimeNotifier.NotifyAgentUpdatedAsync(userId, _mapAgent(agent), ct);
         return agent;
     }
 
@@ -55,12 +57,12 @@ public class AgentService(AppDbContext context, IRealtimeNotifier realtimeNotifi
             .Select(a => new AgentDto
             {
                 Id = a.Id,
-                IpAddress = a.IpAddress,
                 Os = a.Os,
+                IpAddress = a.IpAddress,
+                Port = a.Port,
                 Distribution = a.Distribution,
                 LastHeartbeatAt = a.LastHeartbeatAt,
                 Name = a.Name,
-                Port = a.Port,
             })
             .FirstOrDefaultAsync(ct);
 
@@ -71,26 +73,25 @@ public class AgentService(AppDbContext context, IRealtimeNotifier realtimeNotifi
 
     public async Task<PagedResult<AgentDto>> GetUserAgents(Guid userId, int take, int skip, CancellationToken ct)
     {
-        var items = await context.Agents
-            .Where(a => a.UserId == userId && !a.IsDeleted)
-            .OrderByDescending(a => a.LastHeartbeatAt)
+        var query = context.Agents.AsNoTracking()
+            .Where(a => a.UserId == userId && !a.IsDeleted);
+
+        var items = await query.OrderByDescending(a => a.LastHeartbeatAt)
             .Skip(skip)
             .Take(take)
             .Select(a => new AgentDto
             {
                 Id = a.Id,
-                IpAddress = a.IpAddress,
                 Os = a.Os,
+                IpAddress = a.IpAddress,
+                Port = a.Port,
                 Distribution = a.Distribution,
                 LastHeartbeatAt = a.LastHeartbeatAt,
                 Name = a.Name,
-                Port = a.Port,
             })
             .ToListAsync(ct);
 
-        var count = await context.Agents
-             .Where(a => a.UserId == userId && !a.IsDeleted)
-             .CountAsync(ct);
+        var count = await query.CountAsync(ct);
 
         return new PagedResult<AgentDto>
         {
@@ -105,7 +106,6 @@ public class AgentService(AppDbContext context, IRealtimeNotifier realtimeNotifi
         Guid agentId,
         Guid userId,
         string? name,
-        string? ipAddress,
         OsType? os,
         CancellationToken ct)
     {
@@ -115,14 +115,11 @@ public class AgentService(AppDbContext context, IRealtimeNotifier realtimeNotifi
         if (!string.IsNullOrWhiteSpace(name))
             agent.Name = name.Trim();
 
-        if (ipAddress != null)
-            agent.IpAddress = ipAddress.Trim();
-
         if (os != null)
             agent.Os = os.Value;
 
         await context.SaveChangesAsync(ct);
-        await realtimeNotifier.NotifyAgentUpdatedAsync(userId, MapAgentDto(agent), ct);
+        await realtimeNotifier.NotifyAgentUpdatedAsync(userId, _mapAgent(agent), ct);
         return true;
     }
 
@@ -133,7 +130,7 @@ public class AgentService(AppDbContext context, IRealtimeNotifier realtimeNotifi
 
         agent.IsDeleted = true;
         await context.SaveChangesAsync(ct);
-        await realtimeNotifier.NotifyAgentDeletedAsync(userId, agentId, ct);
+        await realtimeNotifier.NotifyAgentDeletedAsync(userId, agent.Id, ct);
         return true;
     }
 
@@ -148,29 +145,9 @@ public class AgentService(AppDbContext context, IRealtimeNotifier realtimeNotifi
         return agent.LastHeartbeatAt;
     }
 
-    public async Task<DateTime> HeartbeatInternalAsync(Guid agentId, Guid userId, string? ipAddress, int? port, string? distribution, CancellationToken ct)
-    {
-        var agent = await _getAgentQuery(context, agentId, userId).FirstOrDefaultAsync(ct);
-        if (agent == null) throw new NotFoundException("Агент не существует");
-
-        agent.LastHeartbeatAt = DateTime.UtcNow;
-
-        if (ipAddress != null)
-            agent.IpAddress = ipAddress.Trim();
-
-        if (port.HasValue)
-            agent.Port = port.Value;
-
-        if (distribution != null)
-            agent.Distribution = distribution.Trim();
-
-        await context.SaveChangesAsync(ct);
-        await realtimeNotifier.NotifyAgentUpdatedAsync(userId, MapAgentDto(agent), ct);
-        return agent.LastHeartbeatAt;
-    }
-
     public async Task<AgentDto> RegisterInternalAsync(
         Guid userId,
+        string apiKey,
         Guid? agentId,
         string name,
         string? ipAddress,
@@ -179,43 +156,96 @@ public class AgentService(AppDbContext context, IRealtimeNotifier realtimeNotifi
         string? distribution,
         CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(name))
-            throw new BadRequestException("Имя агента не может быть пустым");
+        var resolvedName = string.IsNullOrWhiteSpace(name) ? "Agent" : name.Trim();
+        var now = DateTime.UtcNow;
 
         Agent? agent = null;
 
         if (agentId.HasValue)
         {
-            agent = await _getAgentQuery(context, agentId.Value, userId).FirstOrDefaultAsync(ct);
+            agent = await context.Agents.FirstOrDefaultAsync(
+                a => a.Id == agentId.Value && a.UserId == userId && !a.IsDeleted,
+                ct);
         }
 
-        if (agent == null)
+        if (agent is null)
         {
             agent = new Agent
             {
+                Id = agentId ?? Guid.NewGuid(),
                 UserId = userId,
-                Name = name.Trim(),
-                IpAddress = ipAddress?.Trim(),
-                Port = port,
+                Name = resolvedName,
                 Os = os,
-                Distribution = distribution?.Trim(),
-                LastHeartbeatAt = DateTime.UtcNow,
+                IpAddress = ipAddress,
+                Port = port,
+                Distribution = distribution,
+                LastHeartbeatAt = now,
             };
 
             context.Agents.Add(agent);
         }
         else
         {
-            agent.Name = name.Trim();
-            agent.IpAddress = ipAddress?.Trim();
-            agent.Port = port;
-            agent.Os = os;
-            agent.Distribution = distribution?.Trim();
-            agent.LastHeartbeatAt = DateTime.UtcNow;
+            agent.Name = resolvedName;
+            if (os.HasValue)
+            {
+                agent.Os = os.Value;
+            }
+
+            if (!string.IsNullOrWhiteSpace(ipAddress))
+            {
+                agent.IpAddress = ipAddress.Trim();
+            }
+
+            if (port.HasValue)
+            {
+                agent.Port = port.Value;
+            }
+
+            if (!string.IsNullOrWhiteSpace(distribution))
+            {
+                agent.Distribution = distribution.Trim();
+            }
+
+            agent.LastHeartbeatAt = now;
         }
 
         await context.SaveChangesAsync(ct);
-        await realtimeNotifier.NotifyAgentUpdatedAsync(userId, MapAgentDto(agent), ct);
-        return MapAgentDto(agent);
+        var dto = _mapAgent(agent);
+        await realtimeNotifier.NotifyAgentUpdatedAsync(userId, dto, ct);
+        return dto;
+    }
+
+    public async Task<DateTime> HeartbeatInternalAsync(
+        Guid agentId,
+        Guid userId,
+        string? ipAddress,
+        int? port,
+        string? distribution,
+        CancellationToken ct)
+    {
+        var agent = await _getAgentQuery(context, agentId, userId).FirstOrDefaultAsync(ct);
+        if (agent == null) throw new NotFoundException("Агент не существует");
+
+        if (!string.IsNullOrWhiteSpace(ipAddress))
+        {
+            agent.IpAddress = ipAddress.Trim();
+        }
+
+        if (port.HasValue)
+        {
+            agent.Port = port.Value;
+        }
+
+        if (!string.IsNullOrWhiteSpace(distribution))
+        {
+            agent.Distribution = distribution.Trim();
+        }
+
+        agent.LastHeartbeatAt = DateTime.UtcNow;
+
+        await context.SaveChangesAsync(ct);
+        await realtimeNotifier.NotifyAgentUpdatedAsync(userId, _mapAgent(agent), ct);
+        return agent.LastHeartbeatAt;
     }
 }

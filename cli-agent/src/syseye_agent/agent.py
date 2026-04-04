@@ -79,6 +79,24 @@ class SingleInstanceLock:
 
 
 class Agent:
+    _TRANSIENT_ERROR_MARKERS = (
+        "temporary failure",
+        "temporarily unavailable",
+        "timed out",
+        "timeout",
+        "network is unreachable",
+        "no route to host",
+        "connection refused",
+        "connection reset",
+        "connection aborted",
+        "could not resolve",
+        "name or service not known",
+        "try again",
+        "tls handshake timeout",
+        "i/o timeout",
+        "service unavailable",
+    )
+
     def __init__(self, config: AgentConfig):
         self.config = config
         self.token = resolve_agent_token(config.token)
@@ -94,8 +112,10 @@ class Agent:
         self.realtime: AgentRealtimeClient | None = None
         self.command_queue: Queue[dict[str, Any]] = Queue()
         self.pending_task_ids: set[str] = set()
+        self.cancelled_task_ids: set[str] = set()
         self.pending_lock = threading.Lock()
-        self.worker_started = False
+        self.fetch_lock = threading.Lock()
+        self.workers_started = False
         self.last_realtime_error = 0.0
 
     def _load_id(self) -> str | None:
@@ -150,9 +170,14 @@ class Agent:
         return self.os_name or None
 
     def register(self) -> None:
+        if self.token.agent_id:
+            self.agent_id = self.token.agent_id
+
+        resolved_name = self.token.name or self.hostname
+
         payload = {
             "agentId": self.agent_id,
-            "name": self.hostname,
+            "name": resolved_name,
             "ipAddress": self._detect_ip_address(),
             "os": self._resolve_os_type(),
             "distribution": self.distribution,
@@ -168,6 +193,8 @@ class Agent:
             print(f"[OK] agent registered: {self.agent_id}")
         except ApiError as exc:
             print(f"[ERR] register: {exc}")
+        except Exception as exc:  # pragma: no cover - runtime safety
+            print(f"[ERR] register: {exc}")
 
     def _rebuild_realtime_client(self) -> None:
         if not self.agent_id:
@@ -182,12 +209,30 @@ class Agent:
             self.agent_id,
             self.token.api_key,
             self.enqueue_command,
+            self.cancel_task,
+            self.request_queue_fill,
             reconnect_delay=max(2, self.config.poll_interval),
             on_log=self._log,
         )
 
     def _log(self, message: str) -> None:
         print(message, flush=True)
+
+    @classmethod
+    def _is_transient_result(cls, result: dict[str, str | int]) -> bool:
+        if str(result.get("status", "")).strip().lower() != "error":
+            return False
+
+        exit_code = result.get("exitCode")
+        if isinstance(exit_code, int) and exit_code in {6, 7, 28, 52, 56, 110, 111, 10060, 10061}:
+            return True
+
+        text = " ".join(
+            str(result.get(key, ""))
+            for key in ("stderr", "stdout")
+        ).lower()
+
+        return any(marker in text for marker in cls._TRANSIENT_ERROR_MARKERS)
 
     def heartbeat(self) -> None:
         if not self.agent_id:
@@ -210,6 +255,10 @@ class Agent:
             self.last_heartbeat = time.time()
         except ApiError as exc:
             if exc.status_code == 404:
+                self.agent_id = None
+                self.register()
+                return
+            if exc.status_code == 401:
                 self.agent_id = None
                 self.register()
                 return
@@ -236,29 +285,51 @@ class Agent:
         except ApiError as exc:
             print(f"[ERR] chunk: {exc}")
 
-    def send_result(self, task_id: str, result: dict[str, str | int]) -> None:
-        try:
-            if self.realtime is not None and self.realtime.is_connected:
-                self.realtime.complete_task(
-                    task_id,
-                    str(result.get("status", "error")),
-                    str(result.get("stdout", "")),
-                    str(result.get("stderr", "")),
-                    int(result["exitCode"]) if result.get("exitCode") is not None else None,
-                )
-                return
-        except RealtimeClientError as exc:
-            print(f"[WARN] realtime result fallback: {exc}")
+    def send_result(self, task_id: str, result: dict[str, str | int]) -> bool:
+        attempts = max(1, self.config.result_retry_attempts)
 
-        try:
-            self.api.send_result(
-                {
-                    "taskId": task_id,
-                    **result,
-                }
-            )
-        except ApiError as exc:
-            print(f"[ERR] result: {exc}")
+        for attempt in range(1, attempts + 1):
+            try:
+                if self.realtime is not None and self.realtime.is_connected:
+                    self.realtime.complete_task(
+                        task_id,
+                        str(result.get("status", "error")),
+                        str(result.get("stdout", "")),
+                        str(result.get("stderr", "")),
+                        int(result["exitCode"]) if result.get("exitCode") is not None else None,
+                    )
+                    return True
+            except RealtimeClientError as exc:
+                print(f"[WARN] realtime result fallback: {exc}")
+
+            try:
+                self.api.send_result(
+                    {
+                        "taskId": task_id,
+                        **result,
+                    }
+                )
+                return True
+            except ApiError as exc:
+                if attempt >= attempts:
+                    print(f"[ERR] result: {exc}")
+                    return False
+
+                print(f"[WARN] result retry {attempt}/{attempts - 1}: {exc}")
+                time.sleep(min(5, attempt))
+
+        return False
+
+    def _send_cancelled_result(self, task_id: str, reason: str) -> None:
+        self.send_result(
+            task_id,
+            {
+                "status": "cancelled",
+                "stdout": "",
+                "stderr": reason,
+                "exitCode": -2,
+            },
+        )
 
     @staticmethod
     def _pick(payload: dict[str, Any], *names: str) -> Any:
@@ -273,16 +344,78 @@ class Agent:
             self._log(f"[ERR] realtime command without executionId: {payload!r}")
             return
 
-        with self.pending_lock:
-            if task_id in self.pending_task_ids:
-                return
+        cancelled_before_start = False
 
-            self.pending_task_ids.add(task_id)
+        with self.pending_lock:
+            if task_id in self.cancelled_task_ids:
+                cancelled_before_start = True
+            elif task_id in self.pending_task_ids:
+                return
+            else:
+                self.pending_task_ids.add(task_id)
+
+        if cancelled_before_start:
+            self._log(f"[SKIP] task already cancelled: {task_id}")
+            self._send_cancelled_result(task_id, "command cancelled before start")
+            with self.pending_lock:
+                self.cancelled_task_ids.discard(task_id)
+            return
 
         self.command_queue.put(payload)
 
         command_name = str(self._pick(payload, "commandName", "CommandName", "title", "Title") or task_id)
         self._log(f"[OK] task received: {command_name}")
+
+    def cancel_task(self, task_id: str) -> None:
+        with self.pending_lock:
+            self.cancelled_task_ids.add(task_id)
+
+        cancelled_running = self.executor.cancel(task_id)
+
+        if cancelled_running:
+            self._log(f"[STOP] task cancelled: {task_id}")
+            return
+
+        self._log(f"[STOP] cancel queued: {task_id}")
+
+    def request_queue_fill(self) -> None:
+        if not self.agent_id or self.fetch_lock.locked():
+            return
+
+        worker = threading.Thread(target=self._fill_capacity, daemon=True)
+        worker.start()
+
+    def _fill_capacity(self) -> None:
+        if not self.agent_id:
+            return
+
+        if not self.fetch_lock.acquire(blocking=False):
+            return
+
+        try:
+            while True:
+                with self.pending_lock:
+                    if len(self.pending_task_ids) >= max(1, self.config.max_parallel_tasks):
+                        return
+
+                task = self.api.get_task(self.agent_id)
+                if task is None:
+                    return
+
+                self.enqueue_command(task)
+        except ApiError as exc:
+            if exc.status_code == 404:
+                self.agent_id = self.token.agent_id
+                self.register()
+                return
+            if exc.status_code == 401:
+                self.agent_id = None
+                self.register()
+                return
+
+            self._log(f"[ERR] fetch task: {exc}")
+        finally:
+            self.fetch_lock.release()
 
     def _execute_payload(self, payload: dict[str, Any]) -> None:
         task_id = str(self._pick(payload, "executionId", "ExecutionId", "taskId", "TaskId") or "").strip()
@@ -291,6 +424,14 @@ class Agent:
 
         if not task_id:
             self._log(f"[ERR] invalid task payload: {payload!r}")
+            return
+
+        with self.pending_lock:
+            cancelled_before_start = task_id in self.cancelled_task_ids
+
+        if cancelled_before_start:
+            self._log(f"[SKIP] cancelled before start: {task_id}")
+            self._send_cancelled_result(task_id, "command cancelled before start")
             return
 
         if not command:
@@ -307,12 +448,26 @@ class Agent:
 
         self._log(f"[RUN] {command_name}: {command}")
 
-        result = self.executor.execute(
-            command,
-            task_id,
-            self.send_chunk,
-            self.config.command_timeout,
-        )
+        max_retries = max(0, self.config.transient_task_retries)
+        attempt = 0
+
+        while True:
+            result = self.executor.execute(
+                command,
+                task_id,
+                self.send_chunk,
+                self.config.command_timeout,
+            )
+
+            if attempt >= max_retries or not self._is_transient_result(result):
+                break
+
+            attempt += 1
+            delay = max(1, self.config.transient_task_retry_delay) * attempt
+            self._log(
+                f"[RETRY] {command_name}: temporary failure, retry {attempt}/{max_retries} in {delay}s",
+            )
+            time.sleep(delay)
 
         self.send_result(task_id, result)
 
@@ -327,16 +482,20 @@ class Agent:
                 if task_id:
                     with self.pending_lock:
                         self.pending_task_ids.discard(task_id)
+                        self.cancelled_task_ids.discard(task_id)
 
                 self.command_queue.task_done()
+                self._fill_capacity()
 
-    def _ensure_worker(self) -> None:
-        if self.worker_started:
+    def _ensure_workers(self) -> None:
+        if self.workers_started:
             return
 
-        worker = threading.Thread(target=self._worker_loop, daemon=True)
-        worker.start()
-        self.worker_started = True
+        for _ in range(max(1, self.config.max_parallel_tasks)):
+            worker = threading.Thread(target=self._worker_loop, daemon=True)
+            worker.start()
+
+        self.workers_started = True
 
     def run(self) -> None:
         try:
@@ -345,12 +504,15 @@ class Agent:
             self._log(f"[ERR] {exc}")
             return
 
-        self._ensure_worker()
+        self._ensure_workers()
         self.register()
 
         try:
             while True:
                 try:
+                    if not self.agent_id:
+                        self.register()
+
                     self.heartbeat()
 
                     if self.agent_id and self.realtime is None:
@@ -365,12 +527,10 @@ class Agent:
                                 self._log(f"[ERR] realtime connect: {exc}")
                                 self.last_realtime_error = now
 
-                    if self.agent_id and (self.realtime is None or not self.realtime.is_connected):
-                        task = self.api.get_task(self.agent_id)
-                        if task is not None:
-                            self._execute_payload(task)
+                    if self.agent_id:
+                        self._fill_capacity()
                 except ApiError as exc:
-                    if exc.status_code == 404:
+                    if exc.status_code in {401, 404}:
                         self.agent_id = self.token.agent_id
                         self.register()
                     else:

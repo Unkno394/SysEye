@@ -3,8 +3,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { CalendarRange, Play, TerminalSquare, Users } from "lucide-react";
 import { apiJson } from "@/lib/api-client";
-import type { AgentDto, AgentTaskDto, CommandDto, PagedResult, ScenarioDetailsDto, ScenarioDto } from "@/lib/backend-types";
+import type { AgentDto, CommandDto, PagedResult, ScenarioDetailsDto, ScenarioDto, TaskExecutionDto, TaskStatus } from "@/lib/backend-types";
 import { getAgentStatus, getOsLabel, getRelativeHeartbeatLabel } from "@/lib/backend-types";
+import { useClientRealtime } from "@/lib/client-realtime";
+import { extractPlaceholderTokens, getPlaceholderIndex, mapExecutionToHistoryItem } from "@/lib/execution-history";
 import { GlassCard, SectionTitle, StatusBadge } from "@/components/ui";
 
 type GroupTask = {
@@ -12,9 +14,12 @@ type GroupTask = {
   agentId: string;
   agentName: string;
   title: string;
-  status: "queued" | "running" | "success" | "error";
+  status: TaskStatus;
   createdAt: string;
-  output: string;
+  completedAt?: string | null;
+  durationSeconds?: number | null;
+  exitCode?: number | null;
+  summary: string;
   kind: "command" | "scenario";
 };
 
@@ -27,7 +32,8 @@ type PlaceholderInput = {
 
 type CommandPlatformFilter = "all" | "linux" | "windows";
 type ScenarioFilter = "all" | "ready" | "empty";
-type HistoryStatusFilter = "all" | "queued" | "success" | "running" | "error";
+type HistoryStatusFilter = "all" | "sent" | "running" | "success" | "error" | "cancelled";
+type ExtendedHistoryStatusFilter = HistoryStatusFilter | "interrupted";
 type ActionNotice = { tone: "success" | "error"; text: string } | null;
 
 type AgentGroupTerminalPanelProps = {
@@ -40,6 +46,13 @@ function formatTaskTime(value: string) {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
   return parsed.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatDuration(value?: number | null) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  if (value < 1) return `${value.toFixed(2)} сек`;
+  if (value < 10) return `${value.toFixed(1)} сек`;
+  return `${Math.round(value)} сек`;
 }
 
 function resolveCommandForAgent(item: CommandDto, agent: AgentDto) {
@@ -81,15 +94,6 @@ function getCommandAvailability(item: CommandDto, agent: AgentDto) {
   };
 }
 
-function extractPlaceholderTokens(script: string) {
-  const matches = script.match(/\$\d+/g) ?? [];
-  return Array.from(new Set(matches)).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
-}
-
-function getPlaceholderIndex(token: string) {
-  return Number(token.replace("$", ""));
-}
-
 function matchesCommandPlatform(command: CommandDto, filter: CommandPlatformFilter) {
   if (filter === "all") return true;
 
@@ -99,26 +103,6 @@ function matchesCommandPlatform(command: CommandDto, filter: CommandPlatformFilt
   if (filter === "linux") return hasBash;
   return hasPowerShell;
 }
-
-function getTaskOutput(task: AgentTaskDto) {
-  const combined = [task.output, task.error].filter(Boolean).join(task.output && task.error ? "\n" : "");
-  if (combined) return combined;
-
-  if (task.status === "queued") {
-    return "Команда поставлена в очередь.";
-  }
-
-  if (task.status === "running") {
-    return "Команда уже выполняется на подключённой машине.";
-  }
-
-  if (task.status === "success") {
-    return "Команда завершилась без дополнительного вывода.";
-  }
-
-  return "Команда завершилась с ошибкой без дополнительного вывода.";
-}
-
 function buildBatchNotice(base: string, successCount: number, totalCount: number): ActionNotice {
   if (successCount <= 0) {
     return {
@@ -144,8 +128,8 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
   const [serverTasks, setServerTasks] = useState<GroupTask[]>([]);
   const [loadedScenarios, setLoadedScenarios] = useState<ScenarioDetailsDto[]>([]);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [statusFilter, setStatusFilter] = useState<HistoryStatusFilter>("all");
-  const [draftStatusFilter, setDraftStatusFilter] = useState<HistoryStatusFilter>("all");
+  const [statusFilter, setStatusFilter] = useState<ExtendedHistoryStatusFilter>("all");
+  const [draftStatusFilter, setDraftStatusFilter] = useState<ExtendedHistoryStatusFilter>("all");
   const [selectedDate, setSelectedDate] = useState("");
   const [draftSelectedDate, setDraftSelectedDate] = useState("");
   const [placeholderModalOpen, setPlaceholderModalOpen] = useState(false);
@@ -165,36 +149,31 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
       return;
     }
 
-    const responses = await Promise.allSettled(
-      agents.map((agent) =>
-        apiJson<PagedResult<AgentTaskDto>>(`/api/hackaton/agent/${agent.id}/tasks?take=20&skip=0`, { method: "GET" }),
-      ),
+    const commandsById = new Map(commands.map((command) => [command.id, command]));
+    const taskGroups = await Promise.all(
+      agents.map(async (agent) => {
+        try {
+          const executions = await apiJson<PagedResult<TaskExecutionDto>>(
+            `/api/hackaton/task/agents/${agent.id}?take=20&skip=0`,
+            { method: "GET" },
+          );
+
+          return (executions.items ?? []).map((execution) => ({
+            ...mapExecutionToHistoryItem(
+              execution,
+              commandsById,
+              agent.name,
+            ),
+            id: `${agent.id}:${execution.id}`,
+            agentName: agent.name,
+          }));
+        } catch {
+          return [];
+        }
+      }),
     );
 
-    const nextTasks: GroupTask[] = [];
-
-    responses.forEach((result, index) => {
-      if (result.status !== "fulfilled") {
-        return;
-      }
-
-      const agent = agents[index];
-
-      for (const task of result.value.items ?? []) {
-        nextTasks.push({
-          id: `${agent.id}:${task.id}`,
-          agentId: agent.id,
-          agentName: agent.name,
-          title: task.title,
-          status: task.status,
-          createdAt: task.createdAt,
-          output: getTaskOutput(task),
-          kind: "command",
-        });
-      }
-    });
-
-    setServerTasks(nextTasks);
+    setServerTasks(taskGroups.flat());
   };
 
   const loadScenarios = async () => {
@@ -238,12 +217,27 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
 
     const intervalId = window.setInterval(() => {
       void loadTasks();
-    }, 5_000);
+    }, 30_000);
 
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [agents]);
+  }, [agents, commands]);
+
+  const trackedAgentIds = useMemo(() => new Set(agents.map((agent) => agent.id)), [agents]);
+
+  useClientRealtime({
+    onTaskQueued: ({ agentId }) => {
+      if (trackedAgentIds.has(agentId)) {
+        void loadTasks();
+      }
+    },
+    onTaskUpdated: ({ agentId }) => {
+      if (trackedAgentIds.has(agentId)) {
+        void loadTasks();
+      }
+    },
+  }, agents.length > 0);
 
   const tasks = useMemo(() => {
     return [...serverTasks].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
@@ -340,13 +334,13 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
       supportedAgents.map((agent) => {
         const command = getCommandAvailability(item, agent).resolvedCommand;
 
-        return apiJson<AgentTaskDto>(
-          `/api/hackaton/agent/${agent.id}/tasks/command`,
+        return apiJson<unknown>(
+          `/api/hackaton/task/agents/${agent.id}/execute`,
           {
             method: "POST",
             body: JSON.stringify({
-              title: item.name,
-              command,
+              commandId: item.id,
+              placeholderValues: {},
             }),
           },
         );
@@ -358,7 +352,7 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
   const executeTemplateCommand = async (commandId: string, values: Record<number, string>) => {
     await runBatch(
       agents.map((agent) =>
-        apiJson<{ message: string; executionId: string }>(
+        apiJson<unknown>(
           `/api/hackaton/task/agents/${agent.id}/execute`,
           {
             method: "POST",
@@ -378,7 +372,7 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
       new Set(
         agents.flatMap((agent) => extractPlaceholderTokens(resolveCommandForAgent(item, agent))),
       ),
-    ).sort((left, right) => Number(left.slice(1)) - Number(right.slice(1)));
+    ).sort((left, right) => getPlaceholderIndex(left) - getPlaceholderIndex(right));
 
     if (!tokens.length) {
       void queueCommandTask(item);
@@ -420,15 +414,10 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
   };
 
   const handleScenarioClick = (scenarioId: string) => {
-    void runBatch(
-      agents.map((agent) =>
-        apiJson<AgentTaskDto[]>(
-          `/api/hackaton/agent/${agent.id}/tasks/scenario/${scenarioId}`,
-          { method: "POST" },
-        ),
-      ),
-      "Сценарий",
-    );
+    setActionNotice({
+      tone: "error",
+      text: "Новый backend пока не запускает сценарии по группе напрямую. Сценарии можно редактировать, но не отправлять на машины одним кликом.",
+    });
   };
 
   const handleSubmitPlaceholderCommand = () => {
@@ -450,7 +439,7 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
         setPlaceholderInputs([]);
         setPlaceholderError(null);
       } catch (error) {
-        setPlaceholderError(error instanceof Error ? error.message : "Не удалось поставить команду в очередь.");
+        setPlaceholderError(error instanceof Error ? error.message : "Не удалось запустить команду.");
       }
     })();
   };
@@ -460,7 +449,7 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
       <div className="border-b border-line px-4 py-4 sm:px-5">
         <SectionTitle
           title="Запуск по группе"
-          subtitle={`${groupName}. Команды и сценарии отправляются сразу на все выбранные машины.`}
+          subtitle={`${groupName}. Команды уходят сразу на выбранные машины, а сценарии пока доступны только как библиотека шагов.`}
           action={
             <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-xs uppercase tracking-[0.18em] text-white/60">
               <Users size={14} />
@@ -613,7 +602,7 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
                   key={scenario.id}
                   type="button"
                   onClick={() => handleScenarioClick(scenario.id)}
-                  className="w-[280px] shrink-0 rounded-2xl border border-white/8 bg-black/20 p-3 text-left transition hover:border-line hover:bg-white/[0.04] sm:w-[300px]"
+                  className="w-[280px] shrink-0 rounded-2xl border border-white/8 bg-black/20 p-3 text-left transition hover:border-amber-400/20 hover:bg-white/[0.04] sm:w-[300px]"
                 >
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <div className="break-words font-medium text-white">{scenario.name}</div>
@@ -629,9 +618,9 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
                       </div>
                     ))}
                   </div>
-                  <div className="mt-3 inline-flex items-center gap-1 text-xs text-accent">
+                  <div className="mt-3 inline-flex items-center gap-1 text-xs text-amber-200">
                     <Play size={12} />
-                    Запустить на группе
+                    Пока без запуска
                   </div>
                 </button>
               ))}
@@ -673,16 +662,26 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
                     <div className="min-w-0">
                       <div className="font-medium text-white">{task.title}</div>
                       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-white/45">
-                        <span>{formatTaskTime(task.createdAt)} · {task.kind === "scenario" ? "Сценарий" : "Команда"}</span>
+                        <span>{formatTaskTime(task.createdAt)} · Команда</span>
                         <span className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-white/45">
                           {task.agentName}
                         </span>
+                        {task.durationSeconds != null ? (
+                          <span className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-white/45">
+                            {formatDuration(task.durationSeconds)}
+                          </span>
+                        ) : null}
+                        {task.exitCode != null ? (
+                          <span className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-white/45">
+                            exit {task.exitCode}
+                          </span>
+                        ) : null}
                       </div>
                     </div>
                     <StatusBadge status={task.status} />
                   </div>
-                  <div className="mt-3 rounded-2xl border border-white/8 bg-[#081018] p-3 font-mono text-xs text-[#9af7c8] break-words whitespace-pre-wrap">
-                    {task.output}
+                  <div className="mt-3 rounded-2xl border border-white/8 bg-[#081018] p-3 text-sm text-white/80 break-words whitespace-pre-wrap">
+                    {task.summary}
                   </div>
                 </div>
               ))}
@@ -811,15 +810,17 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
                   <div className="flex flex-wrap gap-2">
                     {[
                       { value: "all", label: "Все" },
-                      { value: "queued", label: "В очереди" },
-                      { value: "success", label: "Успех" },
+                      { value: "sent", label: "Отправлена" },
                       { value: "running", label: "В работе" },
+                      { value: "success", label: "Успех" },
                       { value: "error", label: "Ошибка" },
+                      { value: "cancelled", label: "Отменена" },
+                      { value: "interrupted", label: "Прервана" },
                     ].map((item) => (
                       <button
                         key={item.value}
                         type="button"
-                        onClick={() => setDraftStatusFilter(item.value as HistoryStatusFilter)}
+                        onClick={() => setDraftStatusFilter(item.value as ExtendedHistoryStatusFilter)}
                         className={`rounded-full border px-3 py-1.5 text-xs transition ${
                           draftStatusFilter === item.value
                             ? "border-accent/30 bg-accent/12 text-accent"

@@ -19,6 +19,8 @@ public static class DiExtension
     {
         services.AddSingleton<IRedisCacheService, RedisCacheService>();
 
+        services.AddScoped<ILokiLogReader, LokiLogReader>();
+
         services.AddScoped<IPasswordHasher, PasswordHasher>();
         services.AddScoped<IJwtProvider, JwtProvider>();
 
@@ -32,22 +34,21 @@ public static class DiExtension
 
     public static IServiceCollection AddServices(this IServiceCollection services)
     {
+        services.AddScoped<IRealtimeNotifier, RealtimeNotifier>();
         services.AddScoped<IEmailConfirmService, EmailConfirmService>();
-
-        services.AddScoped<IScenarioService, ScenarioService>();
 
         services.AddHttpClient<ITaskNotificationPublisher, TaskWebhookNotifier>((serviceProvider, client) =>
         {
             var settings = serviceProvider.GetRequiredService<IOptions<TelegramBotNotificationsOptions>>().Value;
             client.Timeout = TimeSpan.FromSeconds(settings.TimeoutSeconds);
         });
-
-        services.AddScoped<ITaskService, TaskService>();
+        services.AddScoped<IAgentOtlpSender, AgentOtlpSender>();
         services.AddScoped<IAgentCommandDispatcher, AgentCommandDispatcher>();
-        services.AddScoped<IRealtimeNotifier, RealtimeNotifier>();
 
         services.AddScoped<IAgentService, AgentService>();
+        services.AddScoped<IScenarioService, ScenarioService>();
         services.AddScoped<ICommandService, CommandService>();
+        services.AddScoped<ITaskService, TaskService>();
 
         services.AddScoped<IResetPasswordService, ResetPasswordService>();
         services.AddScoped<IResetPasswordByEmailService, ResetPasswordByEmailService>();

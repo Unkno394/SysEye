@@ -43,6 +43,7 @@ public class CommandController(ICommandService commandService) : ControllerBase
             request.Description,
             request.BashScript,
             request.PowerShellScript,
+            request.Regex,
             ct);
 
         return Ok();
@@ -64,7 +65,7 @@ public class CommandController(ICommandService commandService) : ControllerBase
     /// </summary>
     /// <param name="commandId">ID команды</param>
     [HttpPost("{commandId}/placeholders")]
-    [ProducesResponseType(typeof(Guid), StatusCodes.Status200OK)]
+    [Produces(typeof(Guid))]
     public async Task<ActionResult<Guid>> AddPlaceholder(Guid commandId, [FromBody] AddPlaceholderRequest request, CancellationToken ct)
     {
         var placeholder = await commandService.AddPlaceholderAsync(

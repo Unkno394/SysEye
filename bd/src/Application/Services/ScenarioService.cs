@@ -81,8 +81,10 @@ public class ScenarioService(AppDbContext context) : IScenarioService
         int skip,
         CancellationToken ct)
     {
-        var items = await context.Scenarios
-            .Where(x => !x.IsDeleted && (x.UserId == userId || x.IsSystem))
+        var query = context.Scenarios.AsNoTracking()
+            .Where(x => !x.IsDeleted && (x.UserId == userId || x.IsSystem));
+
+        var items = await query
             .OrderByDescending(x => x.IsSystem)
             .ThenBy(x => x.Name)
             .Skip(skip)
@@ -96,9 +98,7 @@ public class ScenarioService(AppDbContext context) : IScenarioService
             })
             .ToListAsync(ct);
 
-        var totalCount = await context.Scenarios
-            .Where(x => !x.IsDeleted && (x.UserId == userId || x.IsSystem))
-            .CountAsync(ct);
+        var totalCount = await query.CountAsync(ct);
 
         return new PagedResult<ScenarioDto>
         {

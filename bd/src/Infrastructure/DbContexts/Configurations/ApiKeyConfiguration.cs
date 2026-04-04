@@ -18,10 +18,8 @@ public class ApiKeyConfiguration : IEntityTypeConfiguration<ApiKey>
             .IsRequired();
 
         builder.Property(x => x.AgentId)
-            .HasColumnType("uuid");
-
-        builder.Property(x => x.UserId)
-            .HasColumnType("uuid");
+            .HasColumnType("uuid")
+            .IsRequired();
 
         builder.Property(x => x.Value)
             .IsRequired()
@@ -34,8 +32,7 @@ public class ApiKeyConfiguration : IEntityTypeConfiguration<ApiKey>
         builder.HasOne(x => x.Agent)
             .WithMany()
             .HasForeignKey(x => x.AgentId)
-            .OnDelete(DeleteBehavior.Cascade)
-            .IsRequired(false);
+            .OnDelete(DeleteBehavior.Cascade);
 
         builder.HasIndex(x => x.AgentId)
             .HasDatabaseName("IX_api_keys_agent_id");

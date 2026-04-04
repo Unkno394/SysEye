@@ -1317,7 +1317,7 @@ function inferCommandPlatform(bashScript?: string, powerShellScript?: string): C
 }
 
 function hasPlaceholderTokens(command: string) {
-  return /\$\d+/.test(command);
+  return /\$\d+|\{\d+\}/.test(command);
 }
 
 

@@ -13,18 +13,9 @@ public class ApiKeyService(AppDbContext context,
 {
     public async Task<ApiKeyDto> Generate(Guid agentId, int daysToRevoke, CancellationToken ct)
     {
-        var ownerId = await context.Agents.AsNoTracking()
-            .Where(agent => agent.Id == agentId && !agent.IsDeleted)
-            .Select(agent => (Guid?)agent.UserId)
-            .FirstOrDefaultAsync(ct);
-
-        if (!ownerId.HasValue)
-            throw new NotFoundException("РђРіРµРЅС‚ РЅРµ РЅР°Р№РґРµРЅ");
-
         var key = new ApiKey
         {
             AgentId = agentId,
-            UserId = ownerId.Value,
             RevokedAt = DateTime.UtcNow.AddDays(daysToRevoke),
             Value = verificationTokenProvider.GenerateApiKey()
         };
@@ -45,24 +36,11 @@ public class ApiKeyService(AppDbContext context,
 
         var key = await context.ApiKeys.AsNoTracking()
             .Where(a => a.Value == apiKey
-                && a.RevokedAt.HasValue
                 && a.RevokedAt > DateTime.UtcNow)
             .FirstOrDefaultAsync(ct);
 
         if (key == null) return false;
         return true;
-    }
-
-    public async Task<Guid?> GetOwnerIdByApiKey(string apiKey, CancellationToken ct = default)
-    {
-        if (string.IsNullOrWhiteSpace(apiKey)) return null;
-
-        return await context.ApiKeys.AsNoTracking()
-            .Where(a => a.Value == apiKey && a.RevokedAt.HasValue && a.RevokedAt > DateTime.UtcNow)
-            .Select(a => a.AgentId.HasValue
-                ? (Guid?)a.Agent!.UserId
-                : a.UserId)
-            .FirstOrDefaultAsync(ct);
     }
 
     public async Task Revoke(Guid id, Guid agentId, CancellationToken ct)
@@ -79,11 +57,11 @@ public class ApiKeyService(AppDbContext context,
             .Select(a => new ApiKeySmallDto
             {
                 Id = a.Id,
-                RevokedAt = a.RevokedAt ?? DateTime.MinValue,
+                RevokedAt = a.RevokedAt,
             })
             .FirstOrDefaultAsync(ct);
 
-        if (key == null) throw new NotFoundException("РљР»СЋС‡ РЅРµ СЃСѓС‰РµСЃС‚РІСѓРµС‚");
+        if (key == null) throw new NotFoundException("Ключ не существует");
 
         return key;
     }

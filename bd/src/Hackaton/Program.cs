@@ -1,3 +1,5 @@
+using Application.Interfaces;
+using Infrastructure.Services;
 using Web.Extensions;
 using Web.Extensions.Configuration;
 using Web.Hubs;
@@ -39,6 +41,9 @@ public class Program
 
         builder.Services.AddInfrastructure();
         builder.Services.AddServices();
+
+        builder.Services.AddLokiLogReader(builder.Configuration);
+
         builder.Services.AddBackgroundJobs();
         builder.Host.UseCustomLogging();
         builder.AddClaimsPrincipalExtension();
@@ -98,6 +103,7 @@ public class Program
         app.MapDefaultControllerRoute();
 
         app.MapHub<AgentHub>("/agentHub");
+        app.MapHub<ClientHub>("/clientHub");
 
         app.ApplyMigrations();
 

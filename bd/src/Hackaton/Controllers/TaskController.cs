@@ -1,6 +1,7 @@
 ﻿using Application.DTO;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Web.Contracts.Requests;
 using Web.Extensions;
 
 namespace Web.Controllers;
@@ -12,6 +13,12 @@ public class TaskController(
     ITaskService taskService,
     ILogger<TaskController> logger) : ControllerBase
 {
+    /// <summary>
+    /// Запускает выполнение команды на указанном агенте.
+    /// </summary>
+    /// <param name="agentId">Идентификатор агента.</param>
+    /// <param name="request">Данные для выполнения команды.</param>
+    [Produces(typeof(Guid))]
     [HttpPost("agents/{agentId:guid}/execute")]
     public async Task<IActionResult> ExecuteCommand(
         [FromRoute] Guid agentId,
@@ -24,12 +31,47 @@ public class TaskController(
             request,
             cancellationToken);
 
-        return Ok(new
-        {
-            message = "Команда отправлена агенту",
-            executionId
-        });
+        return Ok(executionId);
+    }
+
+    /// <summary>
+    /// Возвращает список выполнений команд для указанного агента.
+    /// </summary>
+    /// <param name="agentId">Идентификатор агента.</param>
+    /// <param name="request">Параметры пагинации.</param>
+    [HttpGet("agents/{agentId:guid}")]
+    [Produces(typeof(PagedResult<TaskExecutionDto>))]
+    public async Task<ActionResult<TaskExecutionDto>> GetByAgent([FromRoute] Guid agentId,
+        [FromQuery] PagedRequest request,
+        CancellationToken cancellationToken)
+    {
+        var tasks = await taskService.GetTasksByAgent(
+            User.GetUserId(),
+            agentId,
+            request.Take,
+            request.Skip,
+            cancellationToken);
+
+        return Ok(tasks);
+    }
+
+    /// <summary>
+    /// Возвращает список всех выполнений команд текущего пользователя.
+    /// </summary>
+    /// <param name="request">Параметры пагинации.</param>
+    /// <param name="cancellationToken">Токен отмены.</param>
+    [HttpGet()]
+    [Produces(typeof(PagedResult<TaskExecutionDto>))]
+    public async Task<ActionResult<TaskExecutionDto>> GetByUser(
+        [FromQuery] PagedRequest request,
+        CancellationToken cancellationToken)
+    {
+        var tasks = await taskService.GetTasksByUserAsync(
+            User.GetUserId(),
+            request.Take,
+            request.Skip,
+            cancellationToken);
+
+        return Ok(tasks);
     }
 }
-
-

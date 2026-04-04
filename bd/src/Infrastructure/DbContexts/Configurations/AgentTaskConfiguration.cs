@@ -24,6 +24,9 @@ public class AgentTaskConfiguration : IEntityTypeConfiguration<AgentTask>
             .IsRequired()
             .HasColumnType("uuid");
 
+        builder.Property(x => x.CommandId)
+            .HasColumnType("uuid");
+
         builder.Property(x => x.Title)
             .IsRequired()
             .HasMaxLength(200)

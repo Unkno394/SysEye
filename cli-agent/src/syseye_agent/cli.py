@@ -27,6 +27,10 @@ def build_parser() -> argparse.ArgumentParser:
         command_parser.add_argument("--background", action="store_true", help="Detach the agent and keep it running in the background")
         command_parser.add_argument("--log-file", default=None, help="Optional log file for background mode")
         command_parser.add_argument("--background-child", action="store_true", help=argparse.SUPPRESS)
+        command_parser.add_argument("--transient-task-retries", type=int, default=1)
+        command_parser.add_argument("--transient-task-retry-delay", type=int, default=2)
+        command_parser.add_argument("--result-retry-attempts", type=int, default=3)
+        command_parser.add_argument("--max-parallel-tasks", type=int, default=3)
         command_parser.add_argument("--state-file", default=None, help="Custom state file path")
 
     connect_parser = subparsers.add_parser("connect", help="Connect this machine and start the agent loop")
@@ -252,9 +256,17 @@ def main() -> int:
         heartbeat_interval=args.heartbeat_interval,
         request_timeout=args.request_timeout,
         command_timeout=args.command_timeout,
+        transient_task_retries=args.transient_task_retries,
+        transient_task_retry_delay=args.transient_task_retry_delay,
+        result_retry_attempts=args.result_retry_attempts,
+        max_parallel_tasks=args.max_parallel_tasks,
         **({"state_file": args.state_file} if args.state_file else {}),
     )
 
     agent = Agent(config)
     agent.run()
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

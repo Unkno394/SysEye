@@ -6,4 +6,5 @@ public class UpdateCommandRequest
     public string? Description { get; set; }
     public string? BashScript { get; set; }
     public string? PowerShellScript { get; set; }
+    public string? Regex { get; set; }
 }

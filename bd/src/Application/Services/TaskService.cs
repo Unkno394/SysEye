@@ -6,361 +6,13 @@ using Infrastructure.DbContexts;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
-public class TaskService(AppDbContext dbContext,
-        ILogger<TaskService> logger,
-        IAgentCommandDispatcher agentCommandDispatcher,
-        IRealtimeNotifier realtimeNotifier,
-        ITaskNotificationPublisher taskNotificationPublisher) : ITaskService
+public class TaskService(
+    AppDbContext dbContext,
+    IAgentCommandDispatcher agentCommandDispatcher,
+    IRealtimeNotifier realtimeNotifier,
+    ILogger<TaskService> logger) : ITaskService
 {
-    public async Task<List<AgentTaskDto>> EnqueueScenarioAsync(
-        Guid agentId,
-        Guid userId,
-        Guid scenarioId,
-        CancellationToken cancellationToken = default)
-    {
-        var agent = await dbContext.Agents.AsNoTracking()
-            .FirstOrDefaultAsync(x =>
-                x.Id == agentId &&
-                x.UserId == userId &&
-                !x.IsDeleted, cancellationToken);
-
-        if (agent is null)
-            throw new NotFoundException("Агент не найден");
-
-        var scenario = await dbContext.Scenarios.AsNoTracking()
-            .Include(x => x.Commands.OrderBy(command => command.Order))
-            .ThenInclude(x => x.Command)
-            .ThenInclude(x => x.Placeholders)
-            .FirstOrDefaultAsync(x =>
-                x.Id == scenarioId &&
-                (x.UserId == userId || x.IsSystem) &&
-                !x.IsDeleted, cancellationToken);
-
-        if (scenario is null)
-            throw new NotFoundException("Сценарий не найден");
-
-        if (!scenario.Commands.Any())
-            throw new BadRequestException("В сценарии пока нет команд");
-
-        var tasks = new List<AgentTask>();
-
-        foreach (var scenarioCommand in scenario.Commands.OrderBy(x => x.Order))
-        {
-            var command = scenarioCommand.Command;
-            if (command == null || command.IsDeleted)
-                throw new NotFoundException("Одна из команд сценария недоступна");
-
-            var script = GetScriptByOs(agent.Os, command);
-            if (command.Placeholders.Any() || HasPlaceholderTokens(script))
-                throw new BadRequestException("Сценарии пока поддерживают только команды без параметров");
-
-            tasks.Add(new AgentTask
-            {
-                AgentId = agentId,
-                UserId = userId,
-                Title = $"{scenario.Name} · {command.Name}".Trim(),
-                Command = script,
-                Status = "queued",
-                Output = string.Empty,
-                Error = string.Empty,
-                CreatedAt = DateTime.UtcNow,
-            });
-        }
-
-        dbContext.AgentTasks.AddRange(tasks);
-        await dbContext.SaveChangesAsync(cancellationToken);
-
-        var mappedTasks = tasks.Select(MapAgentTask).ToList();
-
-        foreach (var task in tasks)
-        {
-            var mappedTask = MapAgentTask(task);
-            await realtimeNotifier.NotifyTaskQueuedAsync(userId, agentId, mappedTask, cancellationToken);
-            await taskNotificationPublisher.PublishTaskQueuedAsync(userId, agentId, mappedTask, cancellationToken);
-            await agentCommandDispatcher.SendCommandAsync(
-                agentId,
-                new AgentCommandDto
-                {
-                    ExecutionId = task.Id,
-                    CommandId = Guid.Empty,
-                    CommandName = task.Title,
-                    Script = task.Command,
-                },
-                cancellationToken);
-        }
-
-        return mappedTasks;
-    }
-
-    public async Task<AgentTaskDto> EnqueueCommandAsync(
-        Guid agentId,
-        Guid userId,
-        string title,
-        string command,
-        CancellationToken cancellationToken = default)
-    {
-        var agent = await dbContext.Agents.AsNoTracking()
-            .FirstOrDefaultAsync(x =>
-                x.Id == agentId &&
-                x.UserId == userId &&
-                !x.IsDeleted, cancellationToken);
-
-        if (agent is null)
-            throw new NotFoundException("Агент не найден");
-
-        var task = new AgentTask
-        {
-            AgentId = agentId,
-            UserId = userId,
-            Title = title.Trim(),
-            Command = command,
-            Status = "queued",
-            Output = string.Empty,
-            Error = string.Empty,
-            CreatedAt = DateTime.UtcNow,
-        };
-
-        dbContext.AgentTasks.Add(task);
-        await dbContext.SaveChangesAsync(cancellationToken);
-
-        var mappedTask = MapAgentTask(task);
-
-        await realtimeNotifier.NotifyTaskQueuedAsync(userId, agentId, mappedTask, cancellationToken);
-        await taskNotificationPublisher.PublishTaskQueuedAsync(userId, agentId, mappedTask, cancellationToken);
-        await agentCommandDispatcher.SendCommandAsync(
-            agentId,
-            new AgentCommandDto
-            {
-                ExecutionId = task.Id,
-                CommandId = Guid.Empty,
-                CommandName = task.Title,
-                Script = task.Command,
-            },
-            cancellationToken);
-
-        return mappedTask;
-    }
-
-    public async Task<List<InternalAgentTaskDto>> GetQueuedTasksAsync(
-        Guid agentId,
-        Guid userId,
-        CancellationToken cancellationToken = default)
-    {
-        return await dbContext.AgentTasks.AsNoTracking()
-            .Where(item => item.AgentId == agentId && item.UserId == userId && item.Status == "queued" && !item.IsDeleted)
-            .OrderBy(item => item.CreatedAt)
-            .Select(task => new InternalAgentTaskDto
-            {
-                TaskId = task.Id,
-                TaskType = "command",
-                Title = task.Title,
-                Command = task.Command,
-            })
-            .ToListAsync(cancellationToken);
-    }
-
-    public async Task<PagedResult<AgentTaskDto>> GetAgentTasksAsync(
-        Guid agentId,
-        Guid userId,
-        int take,
-        int skip,
-        CancellationToken cancellationToken = default)
-    {
-        var items = await dbContext.AgentTasks.AsNoTracking()
-            .Where(task => task.AgentId == agentId && task.UserId == userId && !task.IsDeleted)
-            .OrderByDescending(task => task.CreatedAt)
-            .Skip(skip)
-            .Take(take)
-            .Select(task => new AgentTaskDto
-            {
-                Id = task.Id,
-                Title = task.Title,
-                Status = task.Status,
-                Output = task.Output,
-                Error = task.Error,
-                ExitCode = task.ExitCode,
-                CreatedAt = task.CreatedAt,
-            })
-            .ToListAsync(cancellationToken);
-
-        var totalCount = await dbContext.AgentTasks.AsNoTracking()
-            .Where(task => task.AgentId == agentId && task.UserId == userId && !task.IsDeleted)
-            .CountAsync(cancellationToken);
-
-        return new PagedResult<AgentTaskDto>
-        {
-            Items = items,
-            TotalCount = totalCount,
-            Skip = skip,
-            Take = take,
-        };
-    }
-
-    public async Task<AgentMetricsDto> GetAgentMetricsAsync(
-        Guid agentId,
-        Guid userId,
-        CancellationToken cancellationToken = default)
-    {
-        var tasks = await dbContext.AgentTasks.AsNoTracking()
-            .Where(task => task.AgentId == agentId && task.UserId == userId && !task.IsDeleted)
-            .Select(task => new
-            {
-                task.Status,
-                task.CreatedAt,
-                task.StartedAt,
-                task.FinishedAt,
-            })
-            .ToListAsync(cancellationToken);
-
-        var utcToday = DateTime.UtcNow.Date;
-        var activityStart = utcToday.AddDays(-6);
-
-        var completedTasks = tasks
-            .Where(task => task.StartedAt.HasValue && task.FinishedAt.HasValue)
-            .ToList();
-
-        var activityMap = tasks
-            .Where(task => task.CreatedAt.Date >= activityStart)
-            .GroupBy(task => task.CreatedAt.Date)
-            .ToDictionary(
-                group => group.Key,
-                group =>
-                {
-                    var completedForDay = group
-                        .Where(task => task.StartedAt.HasValue && task.FinishedAt.HasValue)
-                        .ToList();
-
-                    return new AgentMetricsPointDto
-                    {
-                        Date = group.Key,
-                        TotalRuns = group.Count(),
-                        SuccessRuns = group.Count(task => task.Status == "success"),
-                        ErrorRuns = group.Count(task => task.Status == "error"),
-                        AverageDurationSeconds = completedForDay.Count != 0
-                            ? completedForDay.Average(task => (task.FinishedAt!.Value - task.StartedAt!.Value).TotalSeconds)
-                            : 0,
-                    };
-                });
-
-        var activity = Enumerable.Range(0, 7)
-            .Select(offset => utcToday.AddDays(offset - 6))
-            .Select(date => activityMap.TryGetValue(date, out var point)
-                ? point
-                : new AgentMetricsPointDto
-                {
-                    Date = date,
-                    TotalRuns = 0,
-                    SuccessRuns = 0,
-                    ErrorRuns = 0,
-                    AverageDurationSeconds = 0,
-                })
-            .ToList();
-
-        var successfulRuns = tasks.Count(task => task.Status == "success");
-        var failedRuns = tasks.Count(task => task.Status == "error");
-        var completedRuns = successfulRuns + failedRuns;
-
-        return new AgentMetricsDto
-        {
-            AgentId = agentId,
-            TotalRuns = tasks.Count,
-            SuccessfulRuns = successfulRuns,
-            FailedRuns = failedRuns,
-            RunningRuns = tasks.Count(task => task.Status == "running"),
-            QueuedRuns = tasks.Count(task => task.Status == "queued"),
-            RunsToday = tasks.Count(task => task.CreatedAt.Date == utcToday),
-            ErrorsToday = tasks.Count(task => task.CreatedAt.Date == utcToday && task.Status == "error"),
-            AverageDurationSeconds = completedTasks.Count != 0
-                ? completedTasks.Average(task => (task.FinishedAt!.Value - task.StartedAt!.Value).TotalSeconds)
-                : 0,
-            SuccessRate = completedRuns == 0
-                ? 0
-                : Math.Round((double)successfulRuns / completedRuns * 100, 1),
-            Activity = activity,
-        };
-    }
-
-    public async Task<InternalAgentTaskDto?> GetNextQueuedTaskAsync(
-        Guid agentId,
-        Guid userId,
-        CancellationToken cancellationToken = default)
-    {
-        var task = await dbContext.AgentTasks
-            .Where(item => item.AgentId == agentId && item.UserId == userId && item.Status == "queued" && !item.IsDeleted)
-            .OrderBy(item => item.CreatedAt)
-            .FirstOrDefaultAsync(cancellationToken);
-
-        if (task == null)
-            return null;
-
-        task.Status = "running";
-        task.StartedAt = DateTime.UtcNow;
-        await dbContext.SaveChangesAsync(cancellationToken);
-
-        return new InternalAgentTaskDto
-        {
-            TaskId = task.Id,
-            TaskType = "command",
-            Title = task.Title,
-            Command = task.Command,
-        };
-    }
-
-    public async Task AppendOutputAsync(
-        Guid taskId,
-        Guid userId,
-        string chunk,
-        CancellationToken cancellationToken = default)
-    {
-        var task = await dbContext.AgentTasks
-            .FirstOrDefaultAsync(item => item.Id == taskId && item.UserId == userId && !item.IsDeleted, cancellationToken);
-
-        if (task == null)
-            throw new NotFoundException("Задача не найдена");
-
-        if (task.Status == "queued")
-        {
-            task.Status = "running";
-            task.StartedAt = DateTime.UtcNow;
-        }
-
-        task.Output = string.IsNullOrWhiteSpace(task.Output)
-            ? chunk
-            : $"{task.Output}\n{chunk}";
-
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await realtimeNotifier.NotifyTaskUpdatedAsync(userId, task.AgentId, MapAgentTask(task), cancellationToken);
-    }
-
-    public async Task CompleteTaskAsync(
-        Guid taskId,
-        Guid userId,
-        string status,
-        string stdout,
-        string stderr,
-        int? exitCode,
-        CancellationToken cancellationToken = default)
-    {
-        var task = await dbContext.AgentTasks
-            .FirstOrDefaultAsync(item => item.Id == taskId && item.UserId == userId && !item.IsDeleted, cancellationToken);
-
-        if (task == null)
-            throw new NotFoundException("Задача не найдена");
-
-        task.Status = status;
-        task.Output = string.IsNullOrWhiteSpace(stdout) ? task.Output : stdout;
-        task.Error = stderr ?? string.Empty;
-        task.ExitCode = exitCode;
-        task.FinishedAt = DateTime.UtcNow;
-
-        if (task.StartedAt == null)
-            task.StartedAt = task.FinishedAt;
-
-        await dbContext.SaveChangesAsync(cancellationToken);
-        var mappedTask = MapAgentTask(task);
-        await realtimeNotifier.NotifyTaskUpdatedAsync(userId, task.AgentId, mappedTask, cancellationToken);
-        await taskNotificationPublisher.PublishTaskUpdatedAsync(userId, task.AgentId, mappedTask, cancellationToken);
-    }
+    private const int MaxParallelTasksPerAgent = 3;
 
     public async Task<Guid> ExecuteCommandAsync(
         Guid userId,
@@ -388,16 +40,276 @@ public class TaskService(AppDbContext dbContext,
             throw new NotFoundException("Команда не найдена");
 
         var script = GetScriptByOs(agent.Os, command);
-        var renderedScript = ReplacePlaceholders(script, command.Placeholders, request.PlaceholderValues);
-        var queuedTask = await EnqueueCommandAsync(agent.Id, userId, command.Name, renderedScript, cancellationToken);
+        var renderedScript = ReplacePlaceholders(script, command.Placeholders, request.PlaceholderValues ?? new Dictionary<int, string>());
+
+        var taskExecution = new AgentTask
+        {
+            Id = Guid.NewGuid(),
+            AgentId = agent.Id,
+            UserId = userId,
+            CommandId = command.Id,
+            Title = command.Name,
+            Command = renderedScript,
+            Status = "queued",
+            Output = string.Empty,
+            Error = string.Empty,
+            CreatedAt = DateTime.UtcNow,
+        };
+
+        dbContext.AgentTasks.Add(taskExecution);
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        await realtimeNotifier.NotifyTaskQueuedAsync(
+            userId,
+            agent.Id,
+            MapAgentTaskDto(taskExecution),
+            cancellationToken);
+
+        var dto = new AgentCommandDto
+        {
+            ExecutionId = taskExecution.Id,
+            CommandId = command.Id,
+            CommandName = command.Name,
+            Script = renderedScript,
+        };
+
+        await agentCommandDispatcher.SendCommandAsync(agent.Id, dto, cancellationToken);
 
         logger.LogInformation(
-            "Команда поставлена в очередь. AgentId: {AgentId}, CommandId: {CommandId}, ExecutionId: {ExecutionId}",
+            "Команда отправлена агенту. AgentId: {AgentId}, CommandId: {CommandId}, ExecutionId: {ExecutionId}",
             agent.Id,
             command.Id,
-            queuedTask.Id);
+            taskExecution.Id);
 
-        return queuedTask.Id;
+        return taskExecution.Id;
+    }
+
+    public Task<InternalAgentTaskDto?> GetNextQueuedTaskAsync(
+        Guid agentId,
+        Guid userId,
+        CancellationToken cancellationToken = default)
+        => GetNextQueuedTaskInternalAsync(agentId, userId, cancellationToken);
+
+    public async Task AppendOutputAsync(
+        Guid taskId,
+        Guid userId,
+        string chunk,
+        CancellationToken cancellationToken = default)
+    {
+        var task = await dbContext.AgentTasks
+            .FirstOrDefaultAsync(
+                x => x.Id == taskId && x.UserId == userId && !x.IsDeleted,
+                cancellationToken);
+
+        if (task is null)
+            throw new NotFoundException("Выполнение не найдено");
+
+        if (task.StartedAt is null)
+            task.StartedAt = DateTime.UtcNow;
+
+        if (task.Status is "queued" or "sent")
+            task.Status = "running";
+
+        if (!string.IsNullOrWhiteSpace(chunk))
+            task.Output = string.Concat(task.Output, chunk);
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await realtimeNotifier.NotifyTaskUpdatedAsync(
+            userId,
+            task.AgentId,
+            MapAgentTaskDto(task),
+            cancellationToken);
+
+        logger.LogDebug("Получен chunk выполнения {TaskId}: {Chunk}", taskId, chunk);
+    }
+
+    public async Task CompleteTaskAsync(
+        Guid taskId,
+        Guid userId,
+        string status,
+        string stdout,
+        string stderr,
+        int? exitCode,
+        CancellationToken cancellationToken = default)
+    {
+        var taskExecution = await dbContext.AgentTasks
+            .FirstOrDefaultAsync(
+                x => x.Id == taskId && x.UserId == userId && !x.IsDeleted,
+                cancellationToken);
+
+        if (taskExecution is null)
+            throw new NotFoundException("Выполнение не найдено");
+
+        var normalizedStatus = NormalizeStatus(status);
+        var completedAt = DateTime.UtcNow;
+        var startedAt = taskExecution.StartedAt ?? taskExecution.CreatedAt;
+
+        taskExecution.Status = normalizedStatus;
+        taskExecution.StartedAt ??= startedAt;
+        taskExecution.FinishedAt = completedAt;
+        taskExecution.ExitCode = exitCode;
+        taskExecution.Output = stdout ?? string.Empty;
+        taskExecution.Error = stderr ?? string.Empty;
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await realtimeNotifier.NotifyTaskUpdatedAsync(
+            userId,
+            taskExecution.AgentId,
+            MapAgentTaskDto(taskExecution),
+            cancellationToken);
+
+        logger.LogInformation(
+            "Агент завершил выполнение. TaskId: {TaskId}, Status: {Status}, ExitCode: {ExitCode}",
+            taskId,
+            normalizedStatus,
+            exitCode);
+    }
+
+    public async Task<PagedResult<TaskExecutionDto>> GetTasksByAgent(
+        Guid userId,
+        Guid agentId,
+        int take,
+        int skip,
+        CancellationToken cancellationToken = default)
+    {
+        var agent = await dbContext.Agents.AsNoTracking()
+            .AnyAsync(x => x.Id == agentId &&
+                           x.UserId == userId &&
+                           !x.IsDeleted,
+                           cancellationToken);
+
+        if (!agent) throw new NotFoundException("Агент не найден");
+
+        var query = dbContext.AgentTasks.AsNoTracking()
+            .Where(x => x.AgentId == agentId && x.UserId == userId && !x.IsDeleted);
+
+        var count = await query.CountAsync(cancellationToken);
+
+        var rawTasks = await query
+            .OrderByDescending(x => x.CreatedAt)
+            .Select(t => new
+            {
+                Id = t.Id,
+                t.AgentId,
+                t.CommandId,
+                t.Title,
+                t.CreatedAt,
+                t.StartedAt,
+                t.FinishedAt,
+                t.Status,
+                t.ExitCode,
+                t.Output,
+                t.Error,
+            })
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync(cancellationToken);
+
+        var tasks = rawTasks.Select(t => new TaskExecutionDto
+        {
+            Id = t.Id,
+            CommandId = t.CommandId ?? Guid.Empty,
+            AgentId = t.AgentId,
+            Title = t.Title,
+            StartedAt = t.StartedAt ?? t.CreatedAt,
+            Status = NormalizeStatus(t.Status),
+            CompletedAt = t.FinishedAt,
+            DurationSeconds = t.FinishedAt.HasValue
+                ? Math.Max(0, (t.FinishedAt.Value - (t.StartedAt ?? t.CreatedAt)).TotalSeconds)
+                : null,
+            ExitCode = t.ExitCode,
+            ResultSummary = BuildResultSummary(
+                NormalizeStatus(t.Status),
+                t.Output,
+                t.Error,
+                t.ExitCode),
+            RawOutput = t.Output,
+            RawError = t.Error,
+        }).ToList();
+
+        return new PagedResult<TaskExecutionDto>
+        {
+            Items = tasks,
+            TotalCount = count,
+            Skip = skip,
+            Take = take
+        };
+    }
+
+    public async Task<PagedResult<TaskExecutionDto>> GetTasksByUserAsync(
+        Guid userId,
+        int take,
+        int skip,
+        CancellationToken ct = default)
+    {
+        var agentIds = await dbContext.Agents.AsNoTracking()
+            .Where(x => x.UserId == userId && !x.IsDeleted)
+            .Select(x => x.Id)
+            .ToListAsync(ct);
+
+        if (!agentIds.Any())
+            return new PagedResult<TaskExecutionDto>
+            {
+                Items = new(),
+                Skip = skip,
+                Take = take,
+                TotalCount = 0
+            };
+
+        var query = dbContext.AgentTasks.AsNoTracking()
+            .Where(x => agentIds.Contains(x.AgentId) && !x.IsDeleted);
+
+        var count = await query.CountAsync(ct);
+
+        var rawTasks = await query
+            .OrderByDescending(x => x.CreatedAt)
+            .Select(t => new
+            {
+                Id = t.Id,
+                t.AgentId,
+                t.CommandId,
+                t.Title,
+                t.CreatedAt,
+                t.StartedAt,
+                t.FinishedAt,
+                t.Status,
+                t.ExitCode,
+                t.Output,
+                t.Error,
+            })
+            .Skip(skip)
+            .Take(take)
+            .ToListAsync(ct);
+
+        var tasks = rawTasks.Select(t => new TaskExecutionDto
+        {
+            Id = t.Id,
+            CommandId = t.CommandId ?? Guid.Empty,
+            AgentId = t.AgentId,
+            Title = t.Title,
+            StartedAt = t.StartedAt ?? t.CreatedAt,
+            Status = NormalizeStatus(t.Status),
+            CompletedAt = t.FinishedAt,
+            DurationSeconds = t.FinishedAt.HasValue
+                ? Math.Max(0, (t.FinishedAt.Value - (t.StartedAt ?? t.CreatedAt)).TotalSeconds)
+                : null,
+            ExitCode = t.ExitCode,
+            ResultSummary = BuildResultSummary(
+                NormalizeStatus(t.Status),
+                t.Output,
+                t.Error,
+                t.ExitCode),
+            RawOutput = t.Output,
+            RawError = t.Error,
+        }).ToList();
+
+        return new PagedResult<TaskExecutionDto>
+        {
+            Items = tasks,
+            TotalCount = count,
+            Skip = skip,
+            Take = take
+        };
     }
 
     private static string GetScriptByOs(OsType? os, Command command) => os switch
@@ -412,29 +324,9 @@ public class TaskService(AppDbContext dbContext,
         ICollection<CommandPlaceholder> placeholders,
         Dictionary<int, string> values)
     {
-        var orderedPlaceholders = placeholders.OrderBy(x => x.Index).ToList();
-        var trimmedScript = script.Trim();
-
-        if (IsSinglePlaceholderTemplate(trimmedScript, orderedPlaceholders))
-        {
-            var placeholder = orderedPlaceholders[0];
-
-            if (!values.TryGetValue(placeholder.Index, out var singleValue))
-            {
-                throw new BadRequestException(
-                    $"Не передано значение для плейсхолдера с индексом {placeholder.Index}");
-            }
-
-            var commandName = placeholder.Name?.Trim();
-            if (!string.IsNullOrWhiteSpace(commandName))
-            {
-                return $"{commandName} {singleValue}".Trim();
-            }
-        }
-
         var result = script;
 
-        foreach (var placeholder in orderedPlaceholders)
+        foreach (var placeholder in placeholders.OrderBy(x => x.Index))
         {
             if (!values.TryGetValue(placeholder.Index, out var value))
             {
@@ -449,29 +341,140 @@ public class TaskService(AppDbContext dbContext,
         return result;
     }
 
-    private static bool IsSinglePlaceholderTemplate(string script, IReadOnlyList<CommandPlaceholder> placeholders)
+    private static string NormalizeStatus(string? status)
     {
-        if (placeholders.Count != 1)
-            return false;
+        if (string.IsNullOrWhiteSpace(status))
+            return "error";
 
-        var token = $"${placeholders[0].Index}";
-        var braceToken = $"{{{placeholders[0].Index}}}";
-
-        return script == token || script == braceToken;
+        return status.Trim().ToLowerInvariant() switch
+        {
+            "queued" => "queued",
+            "running" => "running",
+            "success" => "success",
+            "cancelled" => "cancelled",
+            "interrupted" => "interrupted",
+            "sent" => "sent",
+            _ => "error",
+        };
     }
 
-    private static bool HasPlaceholderTokens(string script)
-        => script.Contains("$1") || script.Contains("$2") || script.Contains("$3")
-           || script.Contains("{1}") || script.Contains("{2}") || script.Contains("{3}");
-
-    private static AgentTaskDto MapAgentTask(AgentTask task) => new()
+    private async Task<InternalAgentTaskDto?> GetNextQueuedTaskInternalAsync(
+        Guid agentId,
+        Guid userId,
+        CancellationToken cancellationToken)
     {
-        Id = task.Id,
-        Title = task.Title,
-        Status = task.Status,
-        Output = task.Output,
-        Error = task.Error,
-        ExitCode = task.ExitCode,
-        CreatedAt = task.CreatedAt,
-    };
+        var runningCount = await dbContext.AgentTasks.AsNoTracking()
+            .CountAsync(
+                x => x.AgentId == agentId
+                    && x.UserId == userId
+                    && !x.IsDeleted
+                    && x.Status == "running",
+                cancellationToken);
+
+        if (runningCount >= MaxParallelTasksPerAgent)
+            return null;
+
+        var task = await dbContext.AgentTasks
+            .Where(x =>
+                x.AgentId == agentId
+                && x.UserId == userId
+                && !x.IsDeleted
+                && x.Status == "queued")
+            .OrderBy(x => x.CreatedAt)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (task is null)
+            return null;
+
+        task.Status = "running";
+        task.StartedAt = DateTime.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        await realtimeNotifier.NotifyTaskUpdatedAsync(
+            userId,
+            agentId,
+            MapAgentTaskDto(task),
+            cancellationToken);
+
+        return new InternalAgentTaskDto
+        {
+            TaskId = task.Id,
+            TaskType = "command",
+            Title = task.Title,
+            Command = task.Command,
+        };
+    }
+
+    private static AgentTaskDto MapAgentTaskDto(AgentTask task)
+    {
+        return new AgentTaskDto
+        {
+            Id = task.Id,
+            Title = task.Title,
+            Status = task.Status,
+            Output = task.Output,
+            Error = task.Error,
+            ExitCode = task.ExitCode,
+            CreatedAt = task.CreatedAt,
+        };
+    }
+
+    private static string BuildResultSummary(
+        string status,
+        string stdout,
+        string stderr,
+        int? exitCode)
+    {
+        var stdoutLine = GetFirstMeaningfulLine(stdout);
+        var stderrLine = GetFirstMeaningfulLine(stderr);
+
+        return status switch
+        {
+            "success" when !string.IsNullOrWhiteSpace(stdoutLine) =>
+                TruncateSummary(stdoutLine),
+            "success" =>
+                "Проверка завершилась успешно.",
+            "cancelled" when !string.IsNullOrWhiteSpace(stderrLine) =>
+                $"Отменено: {TruncateSummary(stderrLine)}",
+            "cancelled" =>
+                "Выполнение отменено.",
+            "interrupted" when !string.IsNullOrWhiteSpace(stderrLine) =>
+                $"Прервано: {TruncateSummary(stderrLine)}",
+            "interrupted" =>
+                "Выполнение было прервано.",
+            "running" =>
+                "Команда ещё выполняется.",
+            "queued" =>
+                "Команда ожидает выполнения.",
+            "sent" =>
+                "Команда отправлена агенту.",
+            _ when !string.IsNullOrWhiteSpace(stderrLine) =>
+                $"Ошибка: {TruncateSummary(stderrLine)}",
+            _ when !string.IsNullOrWhiteSpace(stdoutLine) =>
+                $"Ошибка: {TruncateSummary(stdoutLine)}",
+            _ when exitCode.HasValue =>
+                $"Команда завершилась с кодом {exitCode.Value}.",
+            _ =>
+                "Команда завершилась с ошибкой.",
+        };
+    }
+
+    private static string GetFirstMeaningfulLine(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+
+        return value
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault(static line => !string.IsNullOrWhiteSpace(line))
+            ?? string.Empty;
+    }
+
+    private static string TruncateSummary(string value)
+    {
+        const int maxLength = 220;
+        return value.Length <= maxLength
+            ? value
+            : $"{value[..(maxLength - 1)]}…";
+    }
 }

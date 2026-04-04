@@ -1,22 +1,27 @@
-﻿using Application.Interfaces;
+﻿using System.Text.Json;
+using Application.DTO;
+using Application.Interfaces;
+using Infrastructure.DbContexts;
+using Infrastructure.Dto;
+using Infrastructure.Interfaces;
 using Infrastructure.Options;
-using Microsoft.AspNetCore.Http;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Options;
-using Web.Contracts.Requests;
-using Web.Extensions;
+using Web.Contracts;
 
 namespace Web.Hubs;
 
 public class AgentHub(
     IApiKeyService apiKeyService,
-    IAgentService agentService,
     ITaskService taskService,
     IOptions<ApiKeyOptions> options,
+    AppDbContext dbContext,
+    IAgentOtlpSender agentOtlpSender,
+    IHubContext<ClientHub> clientHubContext,
     ILogger<AgentHub> logger) : Hub
 {
     private const string AgentIdItemKey = "AgentId";
-    private const string UserIdItemKey = "UserId";
 
     public override async Task OnConnectedAsync()
     {
@@ -24,24 +29,6 @@ public class AgentHub(
 
         try
         {
-            if (Context.User?.Identity?.IsAuthenticated == true)
-            {
-                var userId = Context.User.GetUserId();
-                Context.Items[UserIdItemKey] = userId;
-
-                var userGroupName = GetUserGroupName(userId);
-                await Groups.AddToGroupAsync(Context.ConnectionId, userGroupName);
-
-                logger.LogInformation(
-                    "Подключён пользовательский realtime-клиент. UserId: {UserId}, ConnectionId: {ConnectionId}, Группа: {GroupName}",
-                    userId,
-                    Context.ConnectionId,
-                    userGroupName);
-
-                await base.OnConnectedAsync();
-                return;
-            }
-
             if (!options.Value.UseApiKeyAccess)
             {
                 logger.LogInformation(
@@ -62,8 +49,6 @@ public class AgentHub(
                 await RejectConnection("Контекст подключения недоступен");
                 return;
             }
-
-            var headers = httpContext.Request.Headers;
 
             if (!TryGetRequiredValue(httpContext, options.Value.ApiKeyHeader, "apiKey", out var apiKey))
             {
@@ -92,8 +77,8 @@ public class AgentHub(
                 agentId,
                 Context.ConnectionId);
 
-            var ownerId = await apiKeyService.GetOwnerIdByApiKey(apiKey);
-            if (!ownerId.HasValue)
+            var isValidApiKey = await apiKeyService.Validate(apiKey);
+            if (!isValidApiKey)
             {
                 logger.LogWarning(
                     "Неверный API-ключ для агента {AgentId}. ConnectionId: {ConnectionId}",
@@ -105,11 +90,9 @@ public class AgentHub(
             }
 
             Context.Items[AgentIdItemKey] = agentId;
-            Context.Items[UserIdItemKey] = ownerId.Value;
 
             var groupName = GetAgentGroupName(agentId);
             await Groups.AddToGroupAsync(Context.ConnectionId, groupName);
-            await Groups.AddToGroupAsync(Context.ConnectionId, GetUserGroupName(ownerId.Value));
 
             logger.LogInformation(
                 "Агент успешно подключён. AgentId: {AgentId}, ConnectionId: {ConnectionId}, Группа: {GroupName}",
@@ -117,7 +100,6 @@ public class AgentHub(
                 Context.ConnectionId,
                 groupName);
 
-            await SendQueuedTasksToCaller(Guid.Parse(agentId), ownerId.Value);
             await base.OnConnectedAsync();
         }
         catch (Exception ex)
@@ -156,60 +138,122 @@ public class AgentHub(
         await base.OnDisconnectedAsync(exception);
     }
 
-    public async Task Heartbeat(InternalHeartbeatRequest? request = null)
+    public async Task SendLog(AgentLogDto agentLogDto)
     {
         var agentId = GetCurrentAgentId();
-        var userId = GetCurrentUserId();
-
-        if (agentId == null || userId == null)
-            return;
-
-        await agentService.HeartbeatInternalAsync(
-            Guid.Parse(agentId),
-            userId.Value,
-            request?.IpAddress,
-            request?.Port,
-            request?.Distribution,
-            Context.ConnectionAborted);
-    }
-
-    public async Task SendTaskOutput(Guid taskId, string chunk)
-    {
-        var userId = GetCurrentUserId();
-        if (!userId.HasValue)
-            return;
-
-        await taskService.AppendOutputAsync(taskId, userId.Value, chunk, Context.ConnectionAborted);
-    }
-
-    public async Task CompleteTask(Guid taskId, string status, string stdout, string stderr, int? exitCode)
-    {
-        var userId = GetCurrentUserId();
-        if (!userId.HasValue)
-            return;
-
-        await taskService.CompleteTaskAsync(taskId, userId.Value, status, stdout, stderr, exitCode, Context.ConnectionAborted);
-    }
-
-    public Task SendLog(string log)
-    {
-        var agentId = GetCurrentAgentId();
-
-        if (string.IsNullOrWhiteSpace(agentId))
-        {
-            logger.LogWarning(
-                "Получен лог от неавторизованного клиента. ConnectionId: {ConnectionId}",
-                Context.ConnectionId);
-
-            return Task.CompletedTask;
-        }
 
         logger.LogInformation(
             "Лог от агента {AgentId}: {Log}",
             agentId,
-            log);
+            agentLogDto.Message);
 
-        return Task.CompletedTask;
+        if (string.IsNullOrWhiteSpace(agentId))
+            return;
+
+        await agentOtlpSender.SendAsync(agentId, agentLogDto);
+
+        if (agentLogDto.ExecutionId.HasValue)
+        {
+            await clientHubContext.Clients
+                .Group(ClientHub.GetExecutionGroup(agentLogDto.ExecutionId.Value))
+                .SendAsync("ExecutionLogReceived", agentLogDto);
+        }
+    }
+
+    public async Task Heartbeat(Dictionary<string, object>? payload)
+    {
+        var agentId = GetCurrentAgentId();
+        if (!Guid.TryParse(agentId, out var parsedAgentId))
+            return;
+
+        var agent = await dbContext.Agents.FirstOrDefaultAsync(
+            x => x.Id == parsedAgentId && !x.IsDeleted,
+            Context.ConnectionAborted);
+
+        if (agent is null)
+            return;
+
+        if (TryGetString(payload, "ipAddress", out var ipAddress) && !string.IsNullOrWhiteSpace(ipAddress))
+        {
+            agent.IpAddress = ipAddress.Trim();
+        }
+
+        if (TryGetInt(payload, "port", out var port))
+        {
+            agent.Port = port;
+        }
+
+        if (TryGetString(payload, "distribution", out var distribution) && !string.IsNullOrWhiteSpace(distribution))
+        {
+            agent.Distribution = distribution.Trim();
+        }
+
+        agent.LastHeartbeatAt = DateTime.UtcNow;
+        await dbContext.SaveChangesAsync(Context.ConnectionAborted);
+
+        var dto = new AgentDto
+        {
+            Id = agent.Id,
+            Name = agent.Name,
+            Os = agent.Os,
+            IpAddress = agent.IpAddress,
+            Port = agent.Port,
+            Distribution = agent.Distribution,
+            LastHeartbeatAt = agent.LastHeartbeatAt,
+        };
+
+        await clientHubContext.Clients
+            .Group(ClientHub.GetUserGroup(agent.UserId.ToString()))
+            .SendAsync("AgentUpdated", dto, Context.ConnectionAborted);
+    }
+
+    public async Task SendTaskOutput(string taskId, string chunk)
+    {
+        if (string.IsNullOrWhiteSpace(chunk))
+            return;
+
+        await SendExecutionLogAsync(
+            taskId,
+            chunk,
+            "Information",
+            "stdout");
+    }
+
+    public async Task CompleteTask(string taskId, string status, string stdout, string stderr, int? exitCode)
+    {
+        var agentId = GetCurrentAgentId();
+        if (Guid.TryParse(agentId, out var parsedAgentId))
+        {
+            var userId = await dbContext.Agents.AsNoTracking()
+                .Where(x => x.Id == parsedAgentId && !x.IsDeleted)
+                .Select(x => x.UserId)
+                .FirstOrDefaultAsync(Context.ConnectionAborted);
+
+            if (userId != Guid.Empty && Guid.TryParse(taskId, out var executionId))
+            {
+                await taskService.CompleteTaskAsync(
+                    executionId,
+                    userId,
+                    status,
+                    stdout,
+                    stderr,
+                    exitCode,
+                    Context.ConnectionAborted);
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(stdout))
+        {
+            await SendExecutionLogAsync(taskId, stdout, "Information", "stdout");
+        }
+
+        if (!string.IsNullOrWhiteSpace(stderr))
+        {
+            await SendExecutionLogAsync(taskId, stderr, "Error", "stderr");
+        }
+
+        var summary = $"status={status}; exitCode={(exitCode.HasValue ? exitCode.Value : -1)}";
+        await SendExecutionLogAsync(taskId, summary, "Information", "completion");
     }
 
     private async Task RejectConnection(string message)
@@ -218,26 +262,86 @@ public class AgentHub(
         Context.Abort();
     }
 
+    private async Task SendExecutionLogAsync(
+        string taskId,
+        string message,
+        string level,
+        string category)
+    {
+        var agentId = GetCurrentAgentId();
+        if (string.IsNullOrWhiteSpace(agentId) || !Guid.TryParse(taskId, out var executionId))
+            return;
+
+        var log = new AgentLogDto
+        {
+            ExecutionId = executionId,
+            Message = message,
+            Level = level,
+            Timestamp = DateTimeOffset.UtcNow,
+            Category = category,
+        };
+
+        await agentOtlpSender.SendAsync(agentId, log, Context.ConnectionAborted);
+        await clientHubContext.Clients
+            .Group(ClientHub.GetExecutionGroup(executionId))
+            .SendAsync("ExecutionLogReceived", log, Context.ConnectionAborted);
+    }
+
     private static bool TryGetRequiredValue(
         HttpContext httpContext,
         string headerName,
-        string queryKey,
+        string queryName,
         out string value)
     {
         value = string.Empty;
 
-        var headers = httpContext.Request.Headers;
-        if (!headers.TryGetValue(headerName, out var headerValues))
+        if (httpContext.Request.Headers.TryGetValue(headerName, out var headerValues))
         {
-            if (!httpContext.Request.Query.TryGetValue(queryKey, out var queryValues))
-                return false;
+            value = headerValues.ToString();
+            return !string.IsNullOrWhiteSpace(value);
+        }
 
+        if (httpContext.Request.Query.TryGetValue(queryName, out var queryValues))
+        {
             value = queryValues.ToString();
             return !string.IsNullOrWhiteSpace(value);
         }
 
-        value = headerValues.ToString();
+        return false;
+    }
+
+    private static bool TryGetString(Dictionary<string, object>? payload, string key, out string value)
+    {
+        value = string.Empty;
+
+        if (payload is null || !payload.TryGetValue(key, out var rawValue) || rawValue is null)
+            return false;
+
+        value = rawValue switch
+        {
+            string stringValue => stringValue,
+            JsonElement { ValueKind: JsonValueKind.String } jsonValue => jsonValue.GetString() ?? string.Empty,
+            _ => rawValue.ToString() ?? string.Empty,
+        };
+
         return !string.IsNullOrWhiteSpace(value);
+    }
+
+    private static bool TryGetInt(Dictionary<string, object>? payload, string key, out int value)
+    {
+        value = 0;
+
+        if (payload is null || !payload.TryGetValue(key, out var rawValue) || rawValue is null)
+            return false;
+
+        return rawValue switch
+        {
+            int intValue => (value = intValue) >= 0,
+            long longValue when longValue is >= int.MinValue and <= int.MaxValue => (value = (int)longValue) >= 0,
+            JsonElement { ValueKind: JsonValueKind.Number } jsonValue when jsonValue.TryGetInt32(out var parsed) => (value = parsed) >= 0,
+            string stringValue when int.TryParse(stringValue, out var parsed) => (value = parsed) >= 0,
+            _ => false,
+        };
     }
 
     private string? GetCurrentAgentId()
@@ -247,33 +351,5 @@ public class AgentHub(
             : null;
     }
 
-    private Guid? GetCurrentUserId()
-    {
-        return Context.Items.TryGetValue(UserIdItemKey, out var value) && value is Guid parsed
-            ? parsed
-            : null;
-    }
-
-    private async Task SendQueuedTasksToCaller(Guid agentId, Guid userId)
-    {
-        var queuedTasks = await taskService.GetQueuedTasksAsync(agentId, userId, Context.ConnectionAborted);
-
-        foreach (var task in queuedTasks)
-        {
-            await Clients.Caller.SendAsync(
-                "Command",
-                new Application.DTO.AgentCommandDto
-                {
-                    ExecutionId = task.TaskId,
-                    CommandId = Guid.Empty,
-                    CommandName = task.Title,
-                    Script = task.Command,
-                },
-                Context.ConnectionAborted);
-        }
-    }
-
-    public static string GetAgentGroupName(Guid agentId) => $"agent-{agentId}";
-    public static string GetAgentGroupName(string agentId) => $"agent-{agentId}";
-    public static string GetUserGroupName(Guid userId) => $"user-{userId}";
+    private static string GetAgentGroupName(string agentId) => $"agent-{agentId}";
 }

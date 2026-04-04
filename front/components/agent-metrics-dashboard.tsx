@@ -1,6 +1,6 @@
 "use client";
 
-import { Activity, AlertTriangle, Clock3, Gauge, Layers3, Sparkles } from "lucide-react";
+import { Activity, AlertTriangle, Clock3, Gauge, Sparkles } from "lucide-react";
 import { GlassCard, SectionTitle } from "@/components/ui";
 import type { AgentMetricsDto } from "@/lib/backend-types";
 
@@ -68,53 +68,12 @@ function KpiCard({
     tone === "accent" ? "text-accent" : tone === "danger" ? "text-rose-300" : "text-white";
 
   return (
-    <div className="rounded-[1.65rem] border border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(0,0,0,0.08))] p-4">
+    <div className="min-h-[164px] rounded-[1.65rem] border border-white/8 bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(0,0,0,0.08))] p-4 sm:p-5">
       <span className="inline-flex h-9 w-9 items-center justify-center rounded-2xl border border-white/8 bg-black/20 text-white/65">
         {icon}
       </span>
-      <div className="mt-4 text-[11px] uppercase tracking-[0.16em] leading-5 text-white/35">{label}</div>
-      <div className={`mt-2 text-3xl font-semibold ${valueTone}`}>{value}</div>
-    </div>
-  );
-}
-
-function StatusBreakdown({ metrics }: { metrics: AgentMetricsDto }) {
-  const total = Math.max(1, metrics.totalRuns);
-  const segments = [
-    { label: "Успешно", value: metrics.successfulRuns, color: "bg-accent" },
-    { label: "Ошибки", value: metrics.failedRuns, color: "bg-rose-300" },
-    { label: "В работе", value: metrics.runningRuns, color: "bg-sky-300" },
-    { label: "В очереди", value: metrics.queuedRuns, color: "bg-violet-300" },
-  ];
-
-  return (
-    <div className="rounded-[1.7rem] border border-white/8 bg-black/20 p-4">
-      <div className="flex items-center gap-2 text-sm font-medium text-white">
-        <Layers3 size={16} className="text-accent" />
-        Распределение задач
-      </div>
-
-      <div className="mt-4 flex h-3 overflow-hidden rounded-full border border-white/8 bg-white/[0.04]">
-        {segments.map((segment) =>
-          segment.value > 0 ? (
-            <div
-              key={segment.label}
-              className={segment.color}
-              style={{ width: `${(segment.value / total) * 100}%` }}
-              title={`${segment.label}: ${segment.value}`}
-            />
-          ) : null,
-        )}
-      </div>
-
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {segments.map((segment) => (
-          <div key={segment.label} className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-4">
-            <div className="text-xs uppercase tracking-[0.16em] text-white/35">{segment.label}</div>
-            <div className="mt-2 text-2xl font-semibold text-white">{segment.value}</div>
-          </div>
-        ))}
-      </div>
+      <div className="mt-5 text-[11px] uppercase tracking-[0.16em] leading-5 text-white/35">{label}</div>
+      <div className={`mt-3 text-3xl font-semibold leading-tight sm:text-[2rem] ${valueTone}`}>{value}</div>
     </div>
   );
 }
@@ -264,22 +223,17 @@ export function AgentMetricsDashboard({
         </div>
       ) : null}
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_340px]">
-        <div className="rounded-[1.85rem] border border-white/8 bg-[radial-gradient(circle_at_top_left,rgba(72,240,173,0.16),transparent_34%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(0,0,0,0.08))] p-5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <div className="flex items-center gap-2 text-sm font-medium text-white">
-                <Sparkles size={16} className="text-accent" />
-                Техническая сводка
-              </div>
-              <div className="mt-1 text-sm text-white/55">Главные цифры по выбранной машине без лишней детализации.</div>
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(280px,340px)]">
+        <div className="rounded-[1.85rem] border border-white/8 bg-[radial-gradient(circle_at_top_left,rgba(72,240,173,0.16),transparent_34%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(0,0,0,0.08))] p-5 sm:p-6">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-medium text-white">
+              <Sparkles size={16} className="text-accent" />
+              Техническая сводка
             </div>
-            <div className="rounded-full border border-white/10 bg-black/20 px-3 py-1 text-xs uppercase tracking-[0.18em] text-white/45">
-              7-day view
-            </div>
+            <div className="mt-1 text-sm text-white/55">Главные цифры по выбранной машине без лишней детализации.</div>
           </div>
 
-          <div className="mt-5 grid gap-3 sm:grid-cols-2 2xl:grid-cols-4">
+          <div className="mt-5 grid gap-3 grid-cols-2">
             <KpiCard icon={<Gauge size={16} />} label="Всего запусков" value={String(metrics.totalRuns)} />
             <KpiCard icon={<Clock3 size={16} />} label="Среднее время" value={formatDuration(metrics.averageDurationSeconds)} />
             <KpiCard icon={<AlertTriangle size={16} />} label="Ошибок за день" value={String(metrics.errorsToday)} tone={metrics.errorsToday ? "danger" : "default"} />
@@ -318,10 +272,6 @@ export function AgentMetricsDashboard({
 
       <div className="mt-4">
         <ActivityChart metrics={metrics} />
-      </div>
-
-      <div className="mt-4">
-        <StatusBreakdown metrics={metrics} />
       </div>
     </GlassCard>
   );

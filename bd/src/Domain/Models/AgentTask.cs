@@ -7,6 +7,7 @@ public class AgentTask : IEntity
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid AgentId { get; set; }
     public Guid UserId { get; set; }
+    public Guid? CommandId { get; set; }
 
     public string Title { get; set; } = string.Empty;
     public string Command { get; set; } = string.Empty;

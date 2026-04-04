@@ -15,12 +15,19 @@ public class InternalAgentController(IAgentService agentService, ITaskService ta
     [Produces(typeof(AgentDto))]
     public async Task<ActionResult<AgentDto>> Register([FromBody] InternalRegisterAgentRequest request, CancellationToken ct)
     {
-        if (!TryGetApiKeyUserId(out var userId))
+        if (!TryGetApiKeyUserContext(out var userId, out var apiKeyAgentId, out var apiKeyValue))
             return Unauthorized();
+
+        if (string.IsNullOrWhiteSpace(apiKeyValue))
+            return Unauthorized();
+
+        if (apiKeyAgentId.HasValue && request.AgentId.HasValue && request.AgentId.Value != apiKeyAgentId.Value)
+            return BadRequest("AgentId в запросе не совпадает с connection token.");
 
         var agent = await agentService.RegisterInternalAsync(
             userId,
-            request.AgentId,
+            apiKeyValue,
+            request.AgentId ?? apiKeyAgentId,
             request.Name,
             request.IpAddress,
             request.Port,
@@ -35,7 +42,10 @@ public class InternalAgentController(IAgentService agentService, ITaskService ta
     [Produces(typeof(DateTime))]
     public async Task<ActionResult<DateTime>> Heartbeat(Guid id, [FromBody] InternalHeartbeatRequest? request, CancellationToken ct)
     {
-        if (!TryGetApiKeyUserId(out var userId))
+        if (!TryGetApiKeyUserContext(out var userId, out var apiKeyAgentId, out _))
+            return Unauthorized();
+
+        if (apiKeyAgentId != id)
             return Unauthorized();
 
         var timestamp = await agentService.HeartbeatInternalAsync(
@@ -53,7 +63,10 @@ public class InternalAgentController(IAgentService agentService, ITaskService ta
     [Produces(typeof(InternalAgentTaskDto))]
     public async Task<ActionResult<InternalAgentTaskDto>> GetNextTask(Guid id, CancellationToken ct)
     {
-        if (!TryGetApiKeyUserId(out var userId))
+        if (!TryGetApiKeyUserContext(out var userId, out var apiKeyAgentId, out _))
+            return Unauthorized();
+
+        if (apiKeyAgentId != id)
             return Unauthorized();
 
         var task = await taskService.GetNextQueuedTaskAsync(id, userId, ct);
@@ -63,15 +76,23 @@ public class InternalAgentController(IAgentService agentService, ITaskService ta
         return Ok(task);
     }
 
-    private bool TryGetApiKeyUserId(out Guid userId)
+    private bool TryGetApiKeyUserContext(out Guid userId, out Guid? agentId, out string? apiKeyValue)
     {
         if (HttpContext.Items.TryGetValue(ApiKeyMiddleware.ApiKeyUserIdItemKey, out var rawUserId) && rawUserId is Guid parsed)
         {
             userId = parsed;
+            agentId = HttpContext.Items.TryGetValue(ApiKeyMiddleware.ApiKeyAgentIdItemKey, out var rawAgentId) && rawAgentId is Guid parsedAgentId
+                ? parsedAgentId
+                : null;
+            apiKeyValue = HttpContext.Items.TryGetValue(ApiKeyMiddleware.ApiKeyValueItemKey, out var rawApiKey)
+                ? rawApiKey as string
+                : null;
             return true;
         }
 
         userId = Guid.Empty;
+        agentId = null;
+        apiKeyValue = null;
         return false;
     }
 }

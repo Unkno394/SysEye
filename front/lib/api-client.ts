@@ -7,6 +7,7 @@ let refreshPromise: Promise<boolean> | null = null;
 function buildInit(init?: RequestInit): RequestInit {
   return {
     credentials: "include",
+    cache: "no-store",
     ...init,
     headers: {
       ...(init?.body ? { "content-type": "application/json" } : {}),

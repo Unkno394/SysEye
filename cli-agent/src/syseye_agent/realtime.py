@@ -23,6 +23,8 @@ class AgentRealtimeClient:
         agent_id: str,
         api_key: str,
         on_command: Callable[[dict[str, Any]], None],
+        on_cancel: Callable[[str], None],
+        on_queue_updated: Callable[[], None] | None = None,
         reconnect_delay: int = 5,
         on_log: Callable[[str], None] | None = None,
     ):
@@ -30,6 +32,8 @@ class AgentRealtimeClient:
         self.agent_id = agent_id
         self.api_key = api_key
         self.on_command = on_command
+        self.on_cancel = on_cancel
+        self.on_queue_updated = on_queue_updated or (lambda: None)
         self.reconnect_delay = max(1, reconnect_delay)
         self.on_log = on_log or (lambda message: None)
 
@@ -124,6 +128,8 @@ class AgentRealtimeClient:
         connection.on_close(self._handle_close)
         connection.on_error(self._handle_error)
         connection.on("Command", self._handle_command)
+        connection.on("CancelTask", self._handle_cancel)
+        connection.on("QueueUpdated", self._handle_queue_updated)
         connection.on("Error", self._handle_server_error)
 
         return connection
@@ -159,6 +165,18 @@ class AgentRealtimeClient:
             return
 
         self.on_command(payload)
+
+    def _handle_cancel(self, arguments: Any) -> None:
+        payload = self._unwrap_payload(arguments)
+        task_id = str(payload or "").strip()
+        if not task_id:
+            self.on_log(f"[ERR] invalid cancel payload: {payload!r}")
+            return
+
+        self.on_cancel(task_id)
+
+    def _handle_queue_updated(self, _: Any = None) -> None:
+        self.on_queue_updated()
 
     @staticmethod
     def _unwrap_payload(arguments: Any) -> Any:

@@ -37,6 +37,9 @@ public class CommandConfiguration : IEntityTypeConfiguration<Command>
             .IsRequired()
             .HasColumnType("text");
 
+        builder.Property(x => x.LogRegex)
+            .HasColumnType("text");
+
         builder.Property(x => x.IsSystem)
             .HasDefaultValue(false);
 

@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import shlex
+import sys
 from textwrap import dedent
 
 
 def build_linux_systemd_unit(server: str, token: str) -> str:
+    python = shlex.quote(sys.executable)
+    module = "syseye_agent"
+    server_arg = shlex.quote(server)
+    token_arg = shlex.quote(token)
+
     return dedent(
         f"""\
         [Unit]
@@ -13,10 +20,12 @@ def build_linux_systemd_unit(server: str, token: str) -> str:
 
         [Service]
         Type=simple
-        ExecStart=%h/.local/bin/syseye-agent connect --server {server} --token {token}
+        ExecStart={python} -m {module} connect --server {server_arg} --token {token_arg}
         Restart=always
         RestartSec=5
         Environment=PYTHONUNBUFFERED=1
+        Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+        WorkingDirectory=%h
 
         [Install]
         WantedBy=default.target

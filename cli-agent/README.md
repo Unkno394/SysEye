@@ -3,10 +3,10 @@
 Installable Python CLI for SysEye agents.
 
 What it does now:
-- registers itself on the local backend using an API key
-- stores the server `agentId` in `~/.syseye-agent/agent_id`
+- creates the server-side agent record on first connect using a connection token
+- can apply a custom machine name from the connection token
 - sends heartbeat in the background loop
-- is ready for task polling when internal task endpoints appear
+- polls and runs queued tasks
 - can generate autostart service templates for Linux and Windows
 
 Install from PyPI from any directory:
@@ -75,6 +75,14 @@ Default background log file:
 
 ```text
 ~/.syseye-agent/agent.log
+```
+
+The connection token is issued in the site UI first. The agent card appears after the first successful connect.
+
+Parallel execution can be limited explicitly:
+
+```bash
+syseye-agent connect --server http://localhost:5000 --token YOUR_CONNECTION_TOKEN --max-parallel-tasks 3
 ```
 
 Version check:
