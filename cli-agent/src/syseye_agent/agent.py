@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import platform
 import socket
+import threading
 import time
+from queue import Queue
 from pathlib import Path
+from typing import Any
 
 from syseye_agent.api import ApiClient, ApiError
 from syseye_agent.config import AgentConfig, ensure_app_dir, resolve_agent_token
 from syseye_agent.executor import CommandExecutor
+from syseye_agent.realtime import AgentRealtimeClient, RealtimeClientError
 
 
 class Agent:
@@ -22,6 +26,12 @@ class Agent:
         self.os_name = platform.system().lower()
         self.distribution = self._detect_distribution()
         self.last_heartbeat = 0.0
+        self.realtime: AgentRealtimeClient | None = None
+        self.command_queue: Queue[dict[str, Any]] = Queue()
+        self.pending_task_ids: set[str] = set()
+        self.pending_lock = threading.Lock()
+        self.worker_started = False
+        self.last_realtime_error = 0.0
 
     def _load_id(self) -> str | None:
         if self.state_path.exists():
@@ -89,9 +99,30 @@ class Agent:
             if resolved_id:
                 self.agent_id = resolved_id
                 self._save_id(resolved_id)
+                self._rebuild_realtime_client()
             print(f"[OK] agent registered: {self.agent_id}")
         except ApiError as exc:
             print(f"[ERR] register: {exc}")
+
+    def _rebuild_realtime_client(self) -> None:
+        if not self.agent_id:
+            self.realtime = None
+            return
+
+        if self.realtime is not None:
+            self.realtime.stop()
+
+        self.realtime = AgentRealtimeClient(
+            self.config.server_url,
+            self.agent_id,
+            self.token.api_key,
+            self.enqueue_command,
+            reconnect_delay=max(2, self.config.poll_interval),
+            on_log=self._log,
+        )
+
+    def _log(self, message: str) -> None:
+        print(message, flush=True)
 
     def heartbeat(self) -> None:
         if not self.agent_id:
@@ -107,16 +138,29 @@ class Agent:
         }
 
         try:
-            self.api.heartbeat(self.agent_id, payload)
+            if self.realtime is not None and self.realtime.is_connected:
+                self.realtime.send_heartbeat(payload)
+            else:
+                self.api.heartbeat(self.agent_id, payload)
             self.last_heartbeat = time.time()
         except ApiError as exc:
             if exc.status_code == 404:
                 self.agent_id = None
                 self.register()
                 return
+
+            print(f"[ERR] heartbeat: {exc}")
+        except RealtimeClientError as exc:
             print(f"[ERR] heartbeat: {exc}")
 
     def send_chunk(self, task_id: str, chunk: str) -> None:
+        try:
+            if self.realtime is not None and self.realtime.is_connected:
+                self.realtime.send_output(task_id, chunk)
+                return
+        except RealtimeClientError as exc:
+            print(f"[WARN] realtime chunk fallback: {exc}")
+
         try:
             self.api.send_output(
                 {
@@ -127,50 +171,19 @@ class Agent:
         except ApiError as exc:
             print(f"[ERR] chunk: {exc}")
 
-    def process_next_task(self) -> None:
-        if not self.agent_id:
-            return
-
+    def send_result(self, task_id: str, result: dict[str, str | int]) -> None:
         try:
-            task = self.api.get_task(self.agent_id)
-        except ApiError as exc:
-            print(f"[ERR] task poll: {exc}")
-            return
-
-        if not task:
-            return
-
-        task_id = str(task.get("taskId", ""))
-        task_type = task.get("taskType")
-        raw_command = task.get("command")
-
-        command = self.executor.build_command(task_type, self.os_name, raw_command)
-
-        if not task_id:
-            print("[ERR] task poll: missing taskId")
-            return
-
-        if not command:
-            try:
-                self.api.send_result(
-                    {
-                        "taskId": task_id,
-                        "status": "error",
-                        "stdout": "",
-                        "stderr": f"unsupported task type: {task_type}",
-                        "exitCode": -1,
-                    }
+            if self.realtime is not None and self.realtime.is_connected:
+                self.realtime.complete_task(
+                    task_id,
+                    str(result.get("status", "error")),
+                    str(result.get("stdout", "")),
+                    str(result.get("stderr", "")),
+                    int(result["exitCode"]) if result.get("exitCode") is not None else None,
                 )
-            except ApiError as exc:
-                print(f"[ERR] unsupported task result: {exc}")
-            return
-
-        result = self.executor.execute(
-            command,
-            task_id,
-            self.send_chunk,
-            self.config.command_timeout,
-        )
+                return
+        except RealtimeClientError as exc:
+            print(f"[WARN] realtime result fallback: {exc}")
 
         try:
             self.api.send_result(
@@ -182,10 +195,115 @@ class Agent:
         except ApiError as exc:
             print(f"[ERR] result: {exc}")
 
+    @staticmethod
+    def _pick(payload: dict[str, Any], *names: str) -> Any:
+        for name in names:
+            if name in payload:
+                return payload[name]
+        return None
+
+    def enqueue_command(self, payload: dict[str, Any]) -> None:
+        task_id = str(self._pick(payload, "executionId", "ExecutionId", "taskId", "TaskId") or "").strip()
+        if not task_id:
+            self._log(f"[ERR] realtime command without executionId: {payload!r}")
+            return
+
+        with self.pending_lock:
+            if task_id in self.pending_task_ids:
+                return
+
+            self.pending_task_ids.add(task_id)
+
+        self.command_queue.put(payload)
+
+        command_name = str(self._pick(payload, "commandName", "CommandName", "title", "Title") or task_id)
+        self._log(f"[OK] task received: {command_name}")
+
+    def _execute_payload(self, payload: dict[str, Any]) -> None:
+        task_id = str(self._pick(payload, "executionId", "ExecutionId", "taskId", "TaskId") or "").strip()
+        command = str(self._pick(payload, "script", "Script", "command", "Command") or "").strip()
+        command_name = str(self._pick(payload, "commandName", "CommandName", "title", "Title") or task_id)
+
+        if not task_id:
+            self._log(f"[ERR] invalid task payload: {payload!r}")
+            return
+
+        if not command:
+            self.send_result(
+                task_id,
+                {
+                    "status": "error",
+                    "stdout": "",
+                    "stderr": "empty command payload",
+                    "exitCode": -1,
+                },
+            )
+            return
+
+        self._log(f"[RUN] {command_name}: {command}")
+
+        result = self.executor.execute(
+            command,
+            task_id,
+            self.send_chunk,
+            self.config.command_timeout,
+        )
+
+        self.send_result(task_id, result)
+
+    def _worker_loop(self) -> None:
+        while True:
+            payload = self.command_queue.get()
+            task_id = str(self._pick(payload, "executionId", "ExecutionId", "taskId", "TaskId") or "").strip()
+
+            try:
+                self._execute_payload(payload)
+            finally:
+                if task_id:
+                    with self.pending_lock:
+                        self.pending_task_ids.discard(task_id)
+
+                self.command_queue.task_done()
+
+    def _ensure_worker(self) -> None:
+        if self.worker_started:
+            return
+
+        worker = threading.Thread(target=self._worker_loop, daemon=True)
+        worker.start()
+        self.worker_started = True
+
     def run(self) -> None:
+        self._ensure_worker()
         self.register()
 
         while True:
-            self.heartbeat()
-            self.process_next_task()
-            time.sleep(self.config.poll_interval)
+            try:
+                self.heartbeat()
+
+                if self.agent_id and self.realtime is None:
+                    self._rebuild_realtime_client()
+
+                if self.realtime is not None:
+                    try:
+                        self.realtime.ensure_connected()
+                    except RealtimeClientError as exc:
+                        now = time.time()
+                        if now - self.last_realtime_error >= max(5, self.config.poll_interval):
+                            self._log(f"[ERR] realtime connect: {exc}")
+                            self.last_realtime_error = now
+
+                if self.agent_id and (self.realtime is None or not self.realtime.is_connected):
+                    task = self.api.get_task(self.agent_id)
+                    if task is not None:
+                        self._execute_payload(task)
+            except ApiError as exc:
+                if exc.status_code == 404:
+                    self.agent_id = self.token.agent_id
+                    self.register()
+                else:
+                    print(f"[ERR] loop: {exc}")
+            except Exception as exc:  # pragma: no cover - runtime safety
+                print(f"[ERR] loop: {exc}")
+
+            time.sleep(max(1, self.config.poll_interval))

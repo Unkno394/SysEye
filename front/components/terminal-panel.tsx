@@ -3,10 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { CalendarRange, Play, TerminalSquare } from "lucide-react";
 import { apiJson } from "@/lib/api-client";
-import type { AgentDto, AgentTaskDto, CommandDto, PagedResult } from "@/lib/backend-types";
+import type { AgentDto, AgentTaskDto, CommandDto, PagedResult, ScenarioDetailsDto, ScenarioDto } from "@/lib/backend-types";
 import { getRelativeHeartbeatLabel } from "@/lib/backend-types";
 import { getAgentStatus } from "@/lib/backend-types";
-import { scenarios } from "@/lib/mock-data";
 import { GlassCard, SectionTitle, StatusBadge } from "@/components/ui";
 
 type TerminalTask = {
@@ -19,12 +18,14 @@ type TerminalTask = {
 };
 
 type PlaceholderInput = {
+  index: number;
   token: string;
+  label: string;
   value: string;
 };
 
 type CommandPlatformFilter = "all" | "linux" | "windows";
-type ScenarioFilter = "all" | "system" | "custom";
+type ScenarioFilter = "all" | "ready" | "empty";
 
 type TerminalPanelProps = {
   agent: AgentDto;
@@ -50,8 +51,8 @@ function extractPlaceholderTokens(script: string) {
   return Array.from(new Set(matches)).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
 }
 
-function fillCommandTemplate(script: string, inputs: PlaceholderInput[]) {
-  return inputs.reduce((result, item) => result.split(item.token).join(item.value.trim()), script);
+function getPlaceholderIndex(token: string) {
+  return Number(token.replace("$", ""));
 }
 
 function matchesCommandPlatform(command: CommandDto, filter: CommandPlatformFilter) {
@@ -85,7 +86,7 @@ function getTaskOutput(task: AgentTaskDto) {
 
 export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
   const [serverTasks, setServerTasks] = useState<TerminalTask[]>([]);
-  const [localScenarioTasks, setLocalScenarioTasks] = useState<TerminalTask[]>([]);
+  const [loadedScenarios, setLoadedScenarios] = useState<ScenarioDetailsDto[]>([]);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<"all" | "queued" | "success" | "running" | "error">("all");
   const [draftStatusFilter, setDraftStatusFilter] = useState<"all" | "queued" | "success" | "running" | "error">("all");
@@ -95,6 +96,7 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
   const [pendingCommand, setPendingCommand] = useState<CommandDto | null>(null);
   const [placeholderInputs, setPlaceholderInputs] = useState<PlaceholderInput[]>([]);
   const [placeholderError, setPlaceholderError] = useState<string | null>(null);
+  const [placeholderLoading, setPlaceholderLoading] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
   const [commandPlatformFilter, setCommandPlatformFilter] = useState<CommandPlatformFilter>("all");
   const [scenarioQuery, setScenarioQuery] = useState("");
@@ -123,17 +125,56 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
     }
   };
 
+  const loadScenarios = async () => {
+    try {
+      const data = await apiJson<PagedResult<ScenarioDto>>(
+        "/api/hackaton/scenario?take=100&skip=0",
+        { method: "GET" },
+      );
+
+      const items = await Promise.all(
+        (data.items ?? []).map(async (scenario) => {
+          try {
+            const details = await apiJson<ScenarioDetailsDto>(
+              `/api/hackaton/scenario/${scenario.id}`,
+              { method: "GET" },
+            );
+
+            return {
+              ...details,
+              isSystem: Boolean(scenario.isSystem),
+            };
+          } catch {
+            return {
+              ...scenario,
+              commands: [],
+              isSystem: Boolean(scenario.isSystem),
+            };
+          }
+        }),
+      );
+
+      setLoadedScenarios(items);
+    } catch {
+      setLoadedScenarios([]);
+    }
+  };
+
   useEffect(() => {
     void loadTasks();
-    const timer = window.setInterval(() => {
+    void loadScenarios();
+    const intervalId = window.setInterval(() => {
       void loadTasks();
-    }, 3000);
-    return () => window.clearInterval(timer);
+    }, 5_000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
   }, [agent.id]);
 
   const tasks = useMemo(() => {
-    return [...serverTasks, ...localScenarioTasks].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
-  }, [localScenarioTasks, serverTasks]);
+    return [...serverTasks].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+  }, [serverTasks]);
 
   const visibleCommands = useMemo(() => {
     const normalizedQuery = commandQuery.trim().toLowerCase();
@@ -159,12 +200,12 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
   const visibleScenarios = useMemo(() => {
     const normalizedQuery = scenarioQuery.trim().toLowerCase();
 
-    return scenarios.filter((scenario) => {
-      if (scenarioFilter === "system" && !scenario.isSystem) {
+    return loadedScenarios.filter((scenario) => {
+      if (scenarioFilter === "ready" && !scenario.commands.length) {
         return false;
       }
 
-      if (scenarioFilter === "custom" && scenario.isSystem) {
+      if (scenarioFilter === "empty" && scenario.commands.length) {
         return false;
       }
 
@@ -172,13 +213,13 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
         return true;
       }
 
-      const searchText = [scenario.name, scenario.description, scenario.commands.join(" ")]
+      const searchText = [scenario.name, scenario.description, ...(scenario.commands ?? []).map((item) => item.commandName)]
         .join(" ")
         .toLowerCase();
 
       return searchText.includes(normalizedQuery);
     });
-  }, [scenarioFilter, scenarioQuery]);
+  }, [loadedScenarios, scenarioFilter, scenarioQuery]);
 
   const filteredTasks = useMemo(() => {
     return tasks.filter((task) => {
@@ -187,17 +228,6 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
       return matchesStatus && matchesDate;
     });
   }, [selectedDate, statusFilter, tasks]);
-
-  const queueLocalScenarioTask = (task: Omit<TerminalTask, "id" | "createdAt">) => {
-    setLocalScenarioTasks((prev) => [
-      {
-        ...task,
-        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        createdAt: new Date().toISOString(),
-      },
-      ...prev,
-    ]);
-  };
 
   const queueCommandTask = async (title: string, command: string) => {
     await apiJson<AgentTaskDto>(
@@ -215,6 +245,22 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
     await loadTasks();
   };
 
+  const executeTemplateCommand = async (commandId: string, values: Record<number, string>) => {
+    await apiJson<{ message: string; executionId: string }>(
+      `/api/hackaton/task/agents/${agent.id}/execute`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          commandId,
+          placeholderValues: values,
+        }),
+      },
+      "Не удалось запустить шаблонную команду.",
+    );
+
+    await loadTasks();
+  };
+
   const handleCommandClick = (item: CommandDto) => {
     const resolvedCommand = resolveCommandForAgent(item, agent);
     const tokens = extractPlaceholderTokens(resolvedCommand);
@@ -224,37 +270,66 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
       return;
     }
 
-    setPendingCommand(item);
-    setPlaceholderInputs(tokens.map((token) => ({ token, value: "" })));
-    setPlaceholderError(null);
-    setPlaceholderModalOpen(true);
+    void (async () => {
+      setPlaceholderLoading(true);
+      setPendingCommand(item);
+      setPlaceholderError(null);
+      setPlaceholderModalOpen(true);
+
+      try {
+        const loadedPlaceholders = await apiJson<{ index: number; name: string }[]>(
+          `/api/hackaton/command/${item.id}/placeholders`,
+          { method: "GET" },
+        );
+
+        const placeholderMap = new Map((loadedPlaceholders ?? []).map((placeholder) => [placeholder.index, placeholder.name]));
+        setPlaceholderInputs(
+          tokens.map((token) => {
+            const index = getPlaceholderIndex(token);
+            const label = placeholderMap.get(index)?.trim() || `Параметр ${token}`;
+            return { index, token, label, value: "" };
+          }),
+        );
+      } catch (error) {
+        setPlaceholderInputs(
+          tokens.map((token) => {
+            const index = getPlaceholderIndex(token);
+            return { index, token, label: `Параметр ${token}`, value: "" };
+          }),
+        );
+        setPlaceholderError(error instanceof Error ? error.message : "Не удалось загрузить параметры команды.");
+      } finally {
+        setPlaceholderLoading(false);
+      }
+    })();
   };
 
   const handleScenarioClick = (scenarioId: string) => {
-    const scenario = visibleScenarios.find((item) => item.id === scenarioId);
-    if (!scenario) return;
+    void (async () => {
+      await apiJson<AgentTaskDto[]>(
+        `/api/hackaton/agent/${agent.id}/tasks/scenario/${scenarioId}`,
+        { method: "POST" },
+        "Не удалось поставить сценарий в очередь.",
+      );
 
-    queueLocalScenarioTask({
-      kind: "scenario",
-      title: scenario.name,
-      status: "running",
-      output: `Сценарий поставлен в очередь на выполнение.\n\n${scenario.commands.map((item, index) => `${index + 1}. ${item}`).join("\n")}`,
-    });
+      await loadTasks();
+    })();
   };
 
   const handleSubmitPlaceholderCommand = () => {
     if (!pendingCommand) return;
+
     if (placeholderInputs.some((item) => !item.value.trim())) {
       setPlaceholderError("Заполни все параметры перед запуском.");
       return;
     }
 
-    const resolvedCommand = resolveCommandForAgent(pendingCommand, agent);
-    const finalCommand = fillCommandTemplate(resolvedCommand, placeholderInputs);
-
     void (async () => {
       try {
-        await queueCommandTask(pendingCommand.name, finalCommand);
+        await executeTemplateCommand(
+          pendingCommand.id,
+          Object.fromEntries(placeholderInputs.map((item) => [item.index, item.value.trim()])),
+        );
         setPlaceholderModalOpen(false);
         setPendingCommand(null);
         setPlaceholderInputs([]);
@@ -372,8 +447,8 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
               <div className="flex flex-wrap gap-2">
                 {[
                   { value: "all", label: "Все" },
-                  { value: "system", label: "Системные" },
-                  { value: "custom", label: "Пользовательские" },
+                  { value: "ready", label: "С командами" },
+                  { value: "empty", label: "Пустые" },
                 ].map((item) => (
                   <button
                     key={item.value}
@@ -407,9 +482,9 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
                   </div>
                   <div className="mt-2 text-xs text-white/50">{scenario.description}</div>
                   <div className="mt-3 rounded-xl border border-white/8 bg-[#041016] px-3 py-2 text-xs text-white/55">
-                    {scenario.commands.map((command, index) => (
-                      <div key={`${scenario.id}-${command}`} className="truncate">
-                        {index + 1}. {command}
+                    {(scenario.commands ?? []).map((command, index) => (
+                      <div key={`${scenario.id}-${command.commandId}`} className="truncate">
+                        {index + 1}. {command.commandName}
                       </div>
                     ))}
                   </div>
@@ -423,7 +498,7 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
 
             {!visibleScenarios.length ? (
               <div className="mt-3 rounded-2xl border border-dashed border-white/10 px-4 py-8 text-center text-sm text-white/40">
-                {scenarios.length ? "По запросу ничего не найдено." : "Сценариев пока нет."}
+                {loadedScenarios.length ? "По запросу ничего не найдено." : "Сценариев пока нет."}
               </div>
             ) : null}
           </div>
@@ -505,27 +580,28 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
               {placeholderError ? (
                 <div className="rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-100/90">{placeholderError}</div>
               ) : null}
+              {placeholderLoading ? (
+                <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-white/60">Загрузка параметров...</div>
+              ) : null}
               {placeholderInputs.map((item, index) => (
                 <div key={item.token}>
-                  <label className="mb-2 block text-sm text-white/60">{item.token}</label>
+                  <label className="mb-2 block text-sm text-white/60">
+                    {item.label}
+                    <span className="ml-2 font-mono text-white/35">{item.token}</span>
+                  </label>
                   <input
                     value={item.value}
                     onChange={(event) =>
                       setPlaceholderInputs((prev) =>
                         prev.map((current, currentIndex) =>
-                          currentIndex === index ? { ...current, value: event.target.value.replace(/\s+/g, "") } : current,
+                          currentIndex === index ? { ...current, value: event.target.value } : current,
                         ),
                       )
                     }
-                    onKeyDown={(event) => {
-                      if (event.key === " ") {
-                        event.preventDefault();
-                      }
-                    }}
-                    placeholder={`Значение для ${item.token}`}
+                    placeholder={item.label === `Параметр ${item.token}` ? `Значение для ${item.token}` : item.label}
                     className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white outline-none focus:border-accent/25"
                   />
-                  <div className="mt-2 text-xs text-white/35">Без пробелов.</div>
+                  <div className="mt-2 text-xs text-white/35">Значение подставится в шаблон вместо {item.token}.</div>
                 </div>
               ))}
             </div>
@@ -534,6 +610,7 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
               <button
                 type="button"
                 onClick={handleSubmitPlaceholderCommand}
+                disabled={placeholderLoading}
                 className="inline-flex items-center justify-center rounded-2xl border border-accent/25 bg-accent/12 px-4 py-2.5 text-sm font-medium text-accent transition hover:bg-accent/20"
               >
                 Запустить

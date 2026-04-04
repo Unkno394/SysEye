@@ -5,7 +5,13 @@ import { FolderKanban, Plus, Search, TerminalSquare, Trash2 } from "lucide-react
 import { SelectFieldUI } from "@/components/select-field-ui";
 import { GlassCard, PrimaryButton, SectionTitle } from "@/components/ui";
 import { apiJson } from "@/lib/api-client";
-import type { CommandDto, CommandPlaceholderDto, PagedResult } from "@/lib/backend-types";
+import type {
+  CommandDto,
+  CommandPlaceholderDto,
+  PagedResult,
+  ScenarioDetailsDto,
+  ScenarioDto,
+} from "@/lib/backend-types";
 import { cn } from "@/lib/utils";
 
 type FilterValue = "all" | "system" | "custom";
@@ -30,11 +36,11 @@ type EditablePlaceholder = {
 
 type ScenarioStep = {
   id: string;
+  commandId: string;
   title: string;
   description: string;
   platform: ScenarioPlatform;
   script: string;
-  source: "library" | "manual";
 };
 
 const emptyDraft: CommandDraft = {
@@ -50,11 +56,14 @@ export function CommandsStudio() {
   const [placeholders, setPlaceholders] = useState<CommandPlaceholderDto[]>([]);
   const [loadedPlaceholders, setLoadedPlaceholders] = useState<CommandPlaceholderDto[]>([]);
   const [loading, setLoading] = useState(true);
+  const [scenariosLoading, setScenariosLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<FilterValue>("all");
   const [mode, setMode] = useState<Mode>("new-command");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [scenarios, setScenarios] = useState<ScenarioDto[]>([]);
+  const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(null);
   const [draft, setDraft] = useState<CommandDraft>(emptyDraft);
   const [commandPlatform, setCommandPlatform] = useState<CommandPlatform>("linux");
   const [commandKind, setCommandKind] = useState<CommandKind>("plain");
@@ -66,8 +75,6 @@ export function CommandsStudio() {
   const [scenarioQuery, setScenarioQuery] = useState("");
   const [scenarioPlatform, setScenarioPlatform] = useState<ScenarioPlatform>("all");
   const [scenarioSteps, setScenarioSteps] = useState<ScenarioStep[]>([]);
-  const [manualStepName, setManualStepName] = useState("");
-  const [manualStepCommand, setManualStepCommand] = useState("");
 
   const loadCommands = async () => {
     setLoading(true);
@@ -79,6 +86,19 @@ export function CommandsStudio() {
       setCommands([]);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadScenarios = async () => {
+    setScenariosLoading(true);
+
+    try {
+      const data = await apiJson<PagedResult<ScenarioDto>>("/api/hackaton/scenario?take=100&skip=0", { method: "GET" }, "Не удалось загрузить сценарии.");
+      setScenarios((data.items ?? []).map((item) => ({ ...item, isSystem: Boolean(item.isSystem) })));
+    } catch {
+      setScenarios([]);
+    } finally {
+      setScenariosLoading(false);
     }
   };
 
@@ -95,7 +115,8 @@ export function CommandsStudio() {
   };
 
   useEffect(() => {
-    loadCommands();
+    void loadCommands();
+    void loadScenarios();
   }, []);
 
   useEffect(() => {
@@ -141,17 +162,24 @@ export function CommandsStudio() {
     });
   }, [commands]);
 
+  const scenarioCommandLibrary = useMemo(() => {
+    return commandLibrary.filter((command) => {
+      const script = command.script?.trim();
+      return Boolean(script) && !hasPlaceholderTokens(script);
+    });
+  }, [commandLibrary]);
+
   const filteredScenarioCommands = useMemo(() => {
     const normalized = scenarioQuery.trim().toLowerCase();
 
-    return commandLibrary.filter((command) => {
+    return scenarioCommandLibrary.filter((command) => {
       const matchesPlatform = scenarioPlatform === "all" || command.platform === scenarioPlatform;
       if (!matchesPlatform) return false;
       if (!normalized) return true;
 
       return `${command.name} ${command.description} ${command.script}`.toLowerCase().includes(normalized);
     });
-  }, [commandLibrary, scenarioPlatform, scenarioQuery]);
+  }, [scenarioCommandLibrary, scenarioPlatform, scenarioQuery]);
 
   const openNewCommand = () => {
     setMode("new-command");
@@ -168,9 +196,55 @@ export function CommandsStudio() {
 
   const openNewScenario = () => {
     setMode("new-scenario");
-    setSelectedId(null);
+    setSelectedScenarioId(null);
+    setScenarioName("");
+    setScenarioDescription("");
+    setScenarioSteps([]);
+    setScenarioQuery("");
+    setScenarioPlatform("all");
     setError(null);
     setMessage(null);
+  };
+
+  const openScenario = async (scenarioId: string) => {
+    setMode("new-scenario");
+    setSelectedScenarioId(scenarioId);
+    setError(null);
+    setMessage(null);
+    setSaving(true);
+
+    try {
+      const details = await apiJson<ScenarioDetailsDto>(
+        `/api/hackaton/scenario/${scenarioId}`,
+        { method: "GET" },
+        "Не удалось загрузить сценарий.",
+      );
+
+      const commandMap = new Map(commandLibrary.map((command) => [command.id, command]));
+      setScenarioName(details.name);
+      setScenarioDescription(details.description);
+      setScenarioSteps(
+        (details.commands ?? [])
+          .slice()
+          .sort((left, right) => left.order - right.order)
+          .map((command, index) => {
+            const libraryCommand = commandMap.get(command.commandId);
+
+            return {
+              id: `${command.commandId}-${index + 1}`,
+              commandId: command.commandId,
+              title: command.commandName || libraryCommand?.name || "Команда",
+              description: libraryCommand?.description || "Описание не задано.",
+              platform: libraryCommand?.platform ?? "linux",
+              script: libraryCommand?.script || "Команда сейчас недоступна.",
+            };
+          }),
+      );
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Не удалось загрузить сценарий.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const openCommand = (commandId: string) => {
@@ -201,6 +275,20 @@ export function CommandsStudio() {
     const normalizedScript = commandScript.trim();
     const { bashScript, powerShellScript } = mapCommandByPlatform(commandPlatform, normalizedScript);
     const normalizedPlaceholders = commandKind === "template" ? normalizePlaceholders(placeholders) : [];
+
+    if (commandKind === "template") {
+      if (!normalizedPlaceholders.length) {
+        setSaving(false);
+        setError("Для команды с параметрами добавь хотя бы один плейсхолдер.");
+        return;
+      }
+
+      if (!hasPlaceholderTokens(normalizedScript)) {
+        setSaving(false);
+        setError("В шаблоне нет токенов. Добавь в команду что-то вроде ping $1.");
+        return;
+      }
+    }
 
     try {
       if (mode === "edit-command" && draft.id) {
@@ -341,35 +429,22 @@ export function CommandsStudio() {
   };
 
   const addScenarioCommand = (command: (typeof commandLibrary)[number]) => {
+    if (scenarioSteps.some((step) => step.commandId === command.id)) {
+      setMessage("Команда уже добавлена в сценарий.");
+      return;
+    }
+
     setScenarioSteps((prev) => [
       ...prev,
       {
         id: `${command.id}-${Date.now()}`,
+        commandId: command.id,
         title: command.name,
         description: command.description || "Описание не задано.",
         platform: command.platform,
         script: command.script || "Команда не задана.",
-        source: "library",
       },
     ]);
-  };
-
-  const addManualScenarioStep = () => {
-    if (!manualStepName.trim() || !manualStepCommand.trim()) return;
-
-    setScenarioSteps((prev) => [
-      ...prev,
-      {
-        id: `manual-${Date.now()}`,
-        title: manualStepName.trim(),
-        description: "Добавлено вручную",
-        platform: scenarioPlatform === "all" ? "linux" : scenarioPlatform,
-        script: manualStepCommand.trim(),
-        source: "manual",
-      },
-    ]);
-    setManualStepName("");
-    setManualStepCommand("");
   };
 
   const moveScenarioStep = (index: number, direction: -1 | 1) => {
@@ -386,6 +461,127 @@ export function CommandsStudio() {
 
   const removeScenarioStep = (id: string) => {
     setScenarioSteps((prev) => prev.filter((step) => step.id !== id));
+  };
+
+  const syncScenarioCommands = async (scenarioId: string) => {
+    const current = await apiJson<ScenarioDetailsDto>(
+      `/api/hackaton/scenario/${scenarioId}`,
+      { method: "GET" },
+      "Не удалось синхронизировать сценарий.",
+    );
+
+    const currentMap = new Map((current.commands ?? []).map((item) => [item.commandId, item.order]));
+    const nextMap = new Map(scenarioSteps.map((step, index) => [step.commandId, index + 1]));
+
+    for (const commandId of currentMap.keys()) {
+      if (!nextMap.has(commandId)) {
+        await apiJson<void>(
+          `/api/hackaton/scenario/${scenarioId}/commands/${commandId}`,
+          { method: "DELETE" },
+          "Не удалось удалить команду из сценария.",
+        );
+      }
+    }
+
+    for (const [commandId, order] of nextMap.entries()) {
+      if (!currentMap.has(commandId)) {
+        await apiJson<string>(
+          `/api/hackaton/scenario/${scenarioId}/commands`,
+          {
+            method: "POST",
+            body: JSON.stringify({ commandId, order }),
+          },
+          "Не удалось добавить команду в сценарий.",
+        );
+        continue;
+      }
+
+      if (currentMap.get(commandId) !== order) {
+        await apiJson<void>(
+          `/api/hackaton/scenario/${scenarioId}/commands/${commandId}?order=${order}`,
+          { method: "PATCH" },
+          "Не удалось обновить порядок команд.",
+        );
+      }
+    }
+  };
+
+  const saveScenario = async () => {
+    if (!scenarioName.trim()) {
+      setError("Укажи название сценария.");
+      return;
+    }
+
+    if (!scenarioSteps.length) {
+      setError("Добавь хотя бы одну команду в сценарий.");
+      return;
+    }
+
+    setSaving(true);
+    setError(null);
+    setMessage(null);
+
+    try {
+      let scenarioId = selectedScenarioId;
+
+      if (scenarioId) {
+        await apiJson<void>(
+          `/api/hackaton/scenario/${scenarioId}`,
+          {
+            method: "PATCH",
+            body: JSON.stringify({
+              name: scenarioName,
+              description: scenarioDescription,
+            }),
+          },
+          "Не удалось обновить сценарий.",
+        );
+      } else {
+        scenarioId = await apiJson<string>(
+          "/api/hackaton/scenario",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              name: scenarioName,
+              description: scenarioDescription,
+            }),
+          },
+          "Не удалось создать сценарий.",
+        );
+        setSelectedScenarioId(scenarioId);
+      }
+
+      await syncScenarioCommands(scenarioId);
+      await loadScenarios();
+      setMessage(selectedScenarioId ? "Сценарий обновлён." : "Сценарий создан.");
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Не удалось сохранить сценарий.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteScenario = async () => {
+    if (!selectedScenarioId) return;
+
+    setSaving(true);
+    setError(null);
+    setMessage(null);
+
+    try {
+      await apiJson<void>(
+        `/api/hackaton/scenario/${selectedScenarioId}`,
+        { method: "DELETE" },
+        "Не удалось удалить сценарий.",
+      );
+      await loadScenarios();
+      setMessage("Сценарий удалён.");
+      openNewScenario();
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Не удалось удалить сценарий.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -438,11 +634,18 @@ export function CommandsStudio() {
         <div className="grid gap-4 2xl:grid-cols-[0.95fr_1.05fr]">
           <GlassCard className="p-4">
             <SectionTitle
-              title="Новый сценарий"
-              subtitle="Собери последовательность шагов из готовых команд или добавь ручные."
+              title={selectedScenarioId ? "Редактирование сценария" : "Новый сценарий"}
+              subtitle="Собери последовательность шагов из сохранённых команд."
             />
 
             <div className="space-y-4">
+              {error ? (
+                <div className="rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-100/90">{error}</div>
+              ) : null}
+              {message ? (
+                <div className="rounded-2xl border border-accent/15 bg-accent/[0.08] px-4 py-3 text-sm text-white/70">{message}</div>
+              ) : null}
+
               <Field
                 label="Название сценария"
                 value={scenarioName}
@@ -457,6 +660,56 @@ export function CommandsStudio() {
                 rows={3}
                 onChange={setScenarioDescription}
               />
+
+              <div className="rounded-[1.6rem] border border-white/8 bg-black/20 p-4">
+                <div className="mb-3 text-sm font-medium text-white">Сценарии</div>
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={openNewScenario}
+                    className={cn(
+                      "block w-full rounded-[1.2rem] border px-3.5 py-3 text-left transition",
+                      !selectedScenarioId
+                        ? "border-line bg-white/8"
+                        : "border-white/8 bg-white/5 hover:border-line hover:bg-white/[0.07]",
+                    )}
+                  >
+                    <div className="font-medium text-white">Новый сценарий</div>
+                    <p className="mt-2 text-sm leading-5 text-white/55">Создай новый сценарий из сохранённых команд.</p>
+                  </button>
+
+                  <div className="terminal-scroll max-h-[28svh] space-y-2 overflow-y-auto pr-1 xl:max-h-[240px]">
+                    {scenariosLoading ? (
+                      <div className="rounded-[1.3rem] border border-white/8 bg-white/5 px-4 py-8 text-center text-sm text-white/45">
+                        Загрузка сценариев...
+                      </div>
+                    ) : scenarios.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => void openScenario(item.id)}
+                        className={cn(
+                          "block w-full rounded-[1.2rem] border px-3.5 py-3 text-left transition",
+                          selectedScenarioId === item.id
+                            ? "border-line bg-white/8"
+                            : "border-white/8 bg-white/5 hover:border-line hover:bg-white/[0.07]",
+                        )}
+                      >
+                        <div className="truncate font-medium text-white">{item.name}</div>
+                        <p className="mt-2 line-clamp-2 text-sm leading-5 text-white/55">
+                          {item.description || "Описание не задано."}
+                        </p>
+                      </button>
+                    ))}
+
+                    {!scenariosLoading && !scenarios.length ? (
+                      <div className="rounded-2xl border border-dashed border-white/10 px-4 py-8 text-center text-sm text-white/40">
+                        Сценариев пока нет.
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
 
               <div className="rounded-[1.6rem] border border-white/8 bg-black/20 p-4">
                 <div className="mb-3 text-sm font-medium text-white">Библиотека команд</div>
@@ -516,7 +769,7 @@ export function CommandsStudio() {
 
                   {!filteredScenarioCommands.length ? (
                     <div className="rounded-2xl border border-dashed border-white/10 px-4 py-8 text-center text-sm text-white/40">
-                      Подходящих команд нет.
+                      Подходящих команд без параметров нет.
                     </div>
                   ) : null}
                 </div>
@@ -586,26 +839,19 @@ export function CommandsStudio() {
                 ) : null}
               </div>
 
-              <div className="rounded-[1.6rem] border border-white/8 bg-black/20 p-4">
-                <div className="mb-3 text-sm font-medium text-white">Дополнительная команда</div>
-                <div className="space-y-3">
-                  <Field
-                    label="Название шага"
-                    value={manualStepName}
-                    placeholder="Например: Проверка docker"
-                    onChange={setManualStepName}
-                  />
-                  <CodeEditorField
-                    label="Команда"
-                    shell="Manual step"
-                    value={manualStepCommand}
-                    placeholder="docker ps"
-                    onChange={setManualStepCommand}
-                  />
-                  <PrimaryButton onClick={addManualScenarioStep} disabled={!manualStepName.trim() || !manualStepCommand.trim()}>
-                    Добавить вручную
-                  </PrimaryButton>
-                </div>
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <PrimaryButton onClick={saveScenario} disabled={saving || !scenarioName.trim() || !scenarioSteps.length}>
+                  {saving ? "Сохранение..." : selectedScenarioId ? "Сохранить сценарий" : "Создать сценарий"}
+                </PrimaryButton>
+                {selectedScenarioId ? (
+                  <button
+                    type="button"
+                    onClick={deleteScenario}
+                    className="inline-flex items-center justify-center rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-2 text-sm font-medium text-rose-200 transition hover:bg-rose-400/15"
+                  >
+                    Удалить
+                  </button>
+                ) : null}
               </div>
             </div>
           </GlassCard>
@@ -773,7 +1019,7 @@ export function CommandsStudio() {
                         <div className="min-w-0">
                           <div className="text-sm font-medium text-white">Плейсхолдеры</div>
                           <p className="mt-1 text-sm leading-6 text-white/55">
-                            Используй в команде токены вида <span className="font-mono text-[#9af7c8]">$1</span>, <span className="font-mono text-[#9af7c8]">$2</span> и дай им понятные названия.
+                            Здесь задаётся, что именно будет подставляться вместо <span className="font-mono text-[#9af7c8]">$1</span>, <span className="font-mono text-[#9af7c8]">$2</span> и так далее. Это может быть как часть команды, так и вся команда целиком.
                           </p>
                         </div>
                         <button
@@ -1034,6 +1280,7 @@ function inferCommandPlatform(bashScript?: string, powerShellScript?: string): C
 function hasPlaceholderTokens(command: string) {
   return /\$\d+/.test(command);
 }
+
 
 function getSingleCommandValue(bashScript?: string, powerShellScript?: string) {
   return bashScript?.trim() || powerShellScript?.trim() || "";

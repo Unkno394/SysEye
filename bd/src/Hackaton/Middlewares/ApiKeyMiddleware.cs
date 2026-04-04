@@ -7,7 +7,6 @@ namespace Web.Middlewares;
 public class ApiKeyMiddleware(RequestDelegate next, IOptions<ApiKeyOptions> options)
 {
     public const string ApiKeyUserIdItemKey = "ApiKeyUserId";
-    public const string ApiKeyValueItemKey = "ApiKeyValue";
 
     public async Task InvokeAsync(HttpContext context, IApiKeyService apiKeyService)
     {
@@ -21,16 +20,14 @@ public class ApiKeyMiddleware(RequestDelegate next, IOptions<ApiKeyOptions> opti
 
         if (requestPath.StartsWith("/internal", StringComparison.OrdinalIgnoreCase))
         {
-            if (!context.Request.Headers.TryGetValue(options.Value.Header, out var extractedApiKey))
+            if (!context.Request.Headers.TryGetValue(options.Value.ApiKeyHeader, out var extractedApiKey))
             {
                 context.Response.StatusCode = 401;
                 await context.Response.WriteAsync("Unauthorized: Missing API key.");
                 return;
             }
 
-            var apiKey = extractedApiKey.ToString();
-            var ownerId = await apiKeyService.GetOwnerId(apiKey, context.RequestAborted);
-
+            var ownerId = await apiKeyService.GetOwnerIdByApiKey(extractedApiKey!);
             if (!ownerId.HasValue)
             {
                 context.Response.StatusCode = 401;
@@ -39,7 +36,6 @@ public class ApiKeyMiddleware(RequestDelegate next, IOptions<ApiKeyOptions> opti
             }
 
             context.Items[ApiKeyUserIdItemKey] = ownerId.Value;
-            context.Items[ApiKeyValueItemKey] = apiKey;
         }
 
         await next(context);

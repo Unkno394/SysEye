@@ -25,8 +25,11 @@ export default function AgentDetailsPage() {
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [editName, setEditName] = useState("");
 
-  const loadData = async () => {
-    setLoading(true);
+  const loadData = async (background = false) => {
+    if (!background) {
+      setLoading(true);
+    }
+
     setError(null);
 
     try {
@@ -43,14 +46,24 @@ export default function AgentDetailsPage() {
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Не удалось загрузить данные агента.");
     } finally {
-      setLoading(false);
+      if (!background) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
-    if (agentId) {
-      loadData();
-    }
+    if (!agentId) return undefined;
+
+    void loadData();
+
+    const intervalId = window.setInterval(() => {
+      void loadData(true);
+    }, 10_000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
   }, [agentId]);
 
   const status = useMemo(() => (agent ? getAgentStatus(agent.lastHeartbeatAt) : "offline"), [agent]);
@@ -196,7 +209,6 @@ export default function AgentDetailsPage() {
       {error ? (
         <GlassCard className="border border-rose-400/20 bg-rose-400/10 p-5 text-sm text-rose-100/90">{error}</GlassCard>
       ) : null}
-
       <TerminalPanel agent={agent} commands={commands} />
 
       {editOpen ? (

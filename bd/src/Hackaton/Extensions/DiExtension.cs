@@ -7,6 +7,7 @@ using Infrastructure.BackgroundJobs.Jobs.Interfaces;
 using Infrastructure.Email;
 using Infrastructure.Interfaces;
 using Infrastructure.Services;
+using Web.Services;
 
 namespace Web.Extensions;
 
@@ -31,9 +32,14 @@ public static class DiExtension
     {
         services.AddScoped<IEmailConfirmService, EmailConfirmService>();
 
+        services.AddScoped<IScenarioService, ScenarioService>();
+
+        services.AddScoped<ITaskService, TaskService>();
+        services.AddScoped<IAgentCommandDispatcher, AgentCommandDispatcher>();
+        services.AddScoped<IRealtimeNotifier, RealtimeNotifier>();
+
         services.AddScoped<IAgentService, AgentService>();
         services.AddScoped<ICommandService, CommandService>();
-        services.AddScoped<ITaskService, TaskService>();
 
         services.AddScoped<IResetPasswordService, ResetPasswordService>();
         services.AddScoped<IResetPasswordByEmailService, ResetPasswordByEmailService>();
@@ -48,6 +54,7 @@ public static class DiExtension
     public static IServiceCollection AddBackgroundJobs(this IServiceCollection services)
     {
         services.AddScoped<IEmailBackgroundJob, EmailBackgroundJob>();
+        services.AddScoped<IApiKeyCleanupJob, ApiKeyCleanupJob>();
 
         return services;
     }

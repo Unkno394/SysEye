@@ -26,8 +26,8 @@ public class AgentConfiguration : IEntityTypeConfiguration<Agent>
             .HasColumnType("varchar(100)");
 
         builder.Property(x => x.IpAddress)
-            .HasMaxLength(45)
-            .HasColumnType("varchar(45)");
+            .HasMaxLength(128)
+            .HasColumnType("varchar(128)");
 
         builder.Property(x => x.Port)
             .HasColumnType("integer");
@@ -36,8 +36,8 @@ public class AgentConfiguration : IEntityTypeConfiguration<Agent>
             .HasColumnType("integer");
 
         builder.Property(x => x.Distribution)
-            .HasMaxLength(100)
-            .HasColumnType("varchar(100)");
+            .HasMaxLength(128)
+            .HasColumnType("varchar(128)");
 
         builder.Property(x => x.LastHeartbeatAt)
             .IsRequired()

@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: syseye-agent
-Version: 0.1.3
+Version: 0.1.6
 Summary: SysEye CLI agent
 Author: SysEye
 License-Expression: MIT
@@ -23,6 +23,7 @@ Requires-Python: >=3.10
 Description-Content-Type: text/markdown
 License-File: LICENSE
 Requires-Dist: requests
+Requires-Dist: signalrcore>=0.9.5
 Provides-Extra: dev
 Requires-Dist: build>=1.2.1; extra == "dev"
 Requires-Dist: twine>=5.1.1; extra == "dev"

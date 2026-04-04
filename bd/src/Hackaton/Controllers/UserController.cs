@@ -10,7 +10,6 @@ namespace API.Controllers;
 public class UserController(
     IUserService userService) : ControllerBase
 {
-    [Authorize]
     [HttpGet("[action]")]
     public async Task<IActionResult> Rename([FromQuery] string name, CancellationToken ct)
     {

@@ -1,5 +1,6 @@
 using Web.Extensions;
 using Web.Extensions.Configuration;
+using Web.Hubs;
 using Web.Middlewares;
 using Web.Middlewares.Web.Middlewares;
 
@@ -25,12 +26,15 @@ public class Program
         builder.Services.AddSwaggerGen();
         builder.Services.AddXmlCommentsToSwagger();
 
+        builder.Services.AddSignalR();
+
         builder.AddAuth();
 
         builder.AddDb();
         builder.AddRedis();
 
         builder.AddHangfire();
+        builder.Services.AddRecurringJobs();
 
         builder.Services.AddInfrastructure();
         builder.Services.AddServices();
@@ -64,6 +68,12 @@ public class Program
 
         app.UseRouting();
 
+        var webSocketOptions = new WebSocketOptions
+        {
+            KeepAliveInterval = TimeSpan.FromSeconds(120)
+        };
+        app.UseWebSockets(webSocketOptions);
+
         app.UseMiddleware<ExceptionHandlingMiddleware>();
         app.UseMiddleware<ApiKeyMiddleware>();
 
@@ -82,6 +92,8 @@ public class Program
         app.UseStaticFiles();
         app.MapControllers();
         app.MapDefaultControllerRoute();
+
+        app.MapHub<AgentHub>("/agentHub");
 
         app.ApplyMigrations();
 

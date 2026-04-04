@@ -25,7 +25,6 @@ public class EmailConfirmController(IEmailConfirmService emailConfirmService) : 
     /// Требует авторизации.
     /// Подтверждение почты
     /// </summary>
-    [Authorize]
     [HttpGet("[action]")]
     public async Task<IActionResult> Confirm([FromQuery] string token, CancellationToken ct)
     {

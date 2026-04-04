@@ -8,170 +8,123 @@
         body {
             margin: 0;
             padding: 0;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            background-color: #edf2f7;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background-color: #f4f7fa;
             line-height: 1.6;
-            color: #d8e2ea;
         }
-
+        
         .container {
             max-width: 600px;
             margin: 0 auto;
-            padding: 24px 16px;
+            padding: 20px;
         }
-
+        
         .email-wrapper {
-            background: #0d1720;
-            border-radius: 20px;
+            background-color: #ffffff;
+            border-radius: 12px;
             overflow: hidden;
-            border: 1px solid #1d2b37;
-            box-shadow: 0 20px 60px rgba(4, 9, 14, 0.25);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
         }
-
+        
         .header {
-            padding: 28px 30px 18px;
-            background:
-                radial-gradient(circle at top right, rgba(88, 255, 179, 0.16), transparent 34%),
-                linear-gradient(180deg, #0f1d28 0%, #0d1720 100%);
-            border-bottom: 1px solid #1d2b37;
-        }
-
-        .brand {
-            display: inline-block;
-            margin-bottom: 16px;
-            padding: 8px 14px;
-            border-radius: 999px;
-            border: 1px solid rgba(88, 255, 179, 0.2);
-            background: rgba(88, 255, 179, 0.08);
-            color: #58ffb3;
-            font-size: 12px;
-            font-weight: 700;
-            letter-spacing: 0.22em;
-            text-transform: uppercase;
-        }
-
-        .header h1 {
-            color: #f6fbff;
-            margin: 0;
-            font-size: 30px;
-            line-height: 1.2;
-            font-weight: 700;
-        }
-
-        .header p {
-            margin: 12px 0 0;
-            max-width: 460px;
-            color: #8fa4b4;
-            font-size: 15px;
-        }
-
-        .content {
-            padding: 28px 30px 18px;
-        }
-
-        .description {
-            color: #d8e2ea;
-            font-size: 16px;
-            margin-bottom: 24px;
-            line-height: 1.6;
-        }
-
-        .code-container {
-            margin: 0 0 22px;
-            border-radius: 18px;
-            overflow: hidden;
-            border: 1px solid #223240;
-            background: #0a1219;
-        }
-
-        .code-header {
-            display: table;
-            width: 100%;
-            box-sizing: border-box;
-            padding: 12px 16px;
-            background: #101b24;
-            border-bottom: 1px solid #1d2b37;
-            color: #708392;
-            font-size: 11px;
-            letter-spacing: 0.18em;
-            text-transform: uppercase;
-        }
-
-        .code-label,
-        .code-expiry {
-            display: table-cell;
-            vertical-align: middle;
-        }
-
-        .code-expiry {
-            text-align: right;
-        }
-
-        .code-body {
-            padding: 24px 20px 26px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 40px 30px;
             text-align: center;
         }
-
+        
+        .header h1 {
+            color: #ffffff;
+            margin: 0;
+            font-size: 28px;
+            font-weight: 600;
+        }
+        
+        .content {
+            padding: 40px 30px;
+        }
+        
+        .description {
+            color: #4a5568;
+            font-size: 16px;
+            margin-bottom: 30px;
+            line-height: 1.6;
+        }
+        
+        .code-container {
+            background-color: #f7fafc;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            margin: 30px 0;
+            border: 1px solid #e2e8f0;
+        }
+        
         .code {
-            font-size: 34px;
-            font-weight: 800;
-            color: #58ffb3;
-            letter-spacing: 8px;
-            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
-            background: rgba(88, 255, 179, 0.05);
+            font-size: 32px;
+            font-weight: 700;
+            color: #667eea;
+            letter-spacing: 4px;
+            font-family: 'Courier New', monospace;
+            background-color: #ffffff;
             display: inline-block;
-            padding: 18px 24px;
-            border-radius: 14px;
-            border: 1px solid rgba(88, 255, 179, 0.14);
+            padding: 15px 25px;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
         }
-
-        .note {
-            margin: 0 0 24px;
-            padding: 16px 18px;
-            border-radius: 16px;
-            border: 1px solid #223240;
-            background: rgba(255, 255, 255, 0.03);
-            color: #8fa4b4;
+        
+        .expiry-info {
+            text-align: center;
+            color: #718096;
             font-size: 14px;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #e2e8f0;
         }
-
+        
+        .expiry-time {
+            font-weight: 600;
+            color: #ed8936;
+        }
+        
         .footer {
-            padding: 0 30px 28px;
+            background-color: #f7fafc;
+            padding: 30px;
+            text-align: center;
+            border-top: 1px solid #e2e8f0;
         }
-
+        
         .footer-text {
-            color: #6f8391;
+            color: #718096;
             font-size: 12px;
             margin: 0;
-            text-align: left;
-            line-height: 1.7;
         }
-
+        
+        .footer-text a {
+            color: #667eea;
+            text-decoration: none;
+        }
+        
         @media only screen and (max-width: 480px) {
             .container {
                 padding: 10px;
             }
-
+            
             .header {
-                padding: 22px 20px 16px;
+                padding: 30px 20px;
             }
-
+            
             .header h1 {
-                font-size: 25px;
+                font-size: 24px;
             }
-
+            
             .content {
-                padding: 20px 20px 16px;
+                padding: 30px 20px;
             }
-
-            .footer {
-                padding: 0 20px 22px;
-            }
-
+            
             .code {
-                font-size: 26px;
-                padding: 16px 18px;
-                letter-spacing: 5px;
+                font-size: 24px;
+                padding: 12px 20px;
+                letter-spacing: 2px;
             }
         }
     </style>
@@ -180,34 +133,27 @@
     <div class="container">
         <div class="email-wrapper">
             <div class="header">
-                <div class="brand">Шкеты</div>
                 <h1>{{TITLE}}</h1>
-                <p>Код подтверждения для входа и активации аккаунта в панели управления.</p>
             </div>
-
+            
             <div class="content">
                 <div class="description">
                     {{DESCRIPTION}}
                 </div>
-
+                
                 <div class="code-container">
-                    <div class="code-header">
-                        <span class="code-label">Код подтверждения</span>
-                        <span class="code-expiry">Действует {{EXPIRY_TIME}} минут</span>
-                    </div>
-                    <div class="code-body">
-                        <div class="code">{{CODE}}</div>
-                    </div>
+                    <div class="code">{{CODE}}</div>
                 </div>
-
-                <p class="note">
-                    Если письмо запросили не вы, ничего делать не нужно. Просто проигнорируйте его.
-                </p>
+                
+                <div class="expiry-info">
+                    Код действителен в течение <span class="expiry-time">{{EXPIRY_TIME}} минут</span>
+                </div>
             </div>
-
+            
             <div class="footer">
                 <p class="footer-text">
-                    Это автоматическое письмо от сервиса Шкеты. Пожалуйста, не отвечайте на него.
+                    Если вы не запрашивали это письмо, просто проигнорируйте его.<br>
+                    &copy; 2024 Ваша Компания. Все права защищены.
                 </p>
             </div>
         </div>

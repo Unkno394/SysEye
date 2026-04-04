@@ -10,7 +10,8 @@ namespace Application.Services;
 public class CommandService(AppDbContext context) : ICommandService
 {
     private static readonly Func<AppDbContext, Guid, Guid, IQueryable<Command>> _getCommandQuery
-        = (ctx, commandId, userId) => ctx.Commands.Where(c => c.Id == commandId && c.UserId == userId);
+        = (context, commandId, userId) => context.Commands
+        .Where(c => c.Id == commandId && c.UserId == userId && !c.IsDeleted);
 
     #region Commands
     public async Task<Command> CreateAsync(
@@ -42,7 +43,7 @@ public class CommandService(AppDbContext context) : ICommandService
     public async Task<PagedResult<CommandDto>> GetUserCommandsAsync(Guid userId, int take, int skip, CancellationToken ct)
     {
         var commands = await context.Commands
-            .Where(c => c.UserId == userId)
+            .Where(c => c.UserId == userId && !c.IsDeleted)
             .OrderBy(c => c.Name)
             .Skip(skip)
             .Take(take)
@@ -58,7 +59,7 @@ public class CommandService(AppDbContext context) : ICommandService
             .ToListAsync(ct);
 
         var count = await context.Commands
-            .Where(c => c.UserId == userId)
+            .Where(c => c.UserId == userId && !c.IsDeleted)
             .CountAsync(ct);
 
         return new PagedResult<CommandDto>
@@ -79,7 +80,9 @@ public class CommandService(AppDbContext context) : ICommandService
         string? powerShellScript,
         CancellationToken ct)
     {
-        var command = await _getCommandQuery(context, commandId, userId).FirstOrDefaultAsync(ct);
+        var command = await _getCommandQuery(context, commandId, userId)
+            .Where(c => !c.IsSystem)
+            .FirstOrDefaultAsync(ct);
         if (command == null) throw new NotFoundException("Команда не существует");
 
         if (!string.IsNullOrWhiteSpace(name))
@@ -100,13 +103,11 @@ public class CommandService(AppDbContext context) : ICommandService
 
     public async Task<bool> DeleteAsync(Guid commandId, Guid userId, CancellationToken ct)
     {
-        var command = await _getCommandQuery(context, commandId, userId).FirstOrDefaultAsync(ct);
-        if (command == null) throw new NotFoundException("Команда не существует");
+        var command = await _getCommandQuery(context, commandId, userId)
+            .Where(c => !c.IsSystem)
+            .ExecuteUpdateAsync(setter => setter.SetProperty(
+                property => property.IsDeleted, true));
 
-        if (command.IsSystem) throw new BadRequestException("Нельзя удалить системную команду");
-
-        context.Commands.Remove(command);
-        await context.SaveChangesAsync(ct);
         return true;
     }
     #endregion
@@ -134,7 +135,9 @@ public class CommandService(AppDbContext context) : ICommandService
        string name,
        CancellationToken ct)
     {
-        var command = await _getCommandQuery(context, commandId, userId).FirstOrDefaultAsync(ct);
+        var command = await _getCommandQuery(context, commandId, userId)
+            .Where(c => !c.IsSystem)
+            .FirstOrDefaultAsync(ct);
         if (command == null) throw new NotFoundException("Команда не существует");
 
         var placeholder = new CommandPlaceholder
@@ -156,7 +159,9 @@ public class CommandService(AppDbContext context) : ICommandService
         string? name,
         CancellationToken ct)
     {
-        var command = await _getCommandQuery(context, commandId, userId).FirstOrDefaultAsync(ct);
+        var command = await _getCommandQuery(context, commandId, userId)
+            .Where(c => !c.IsSystem)
+            .FirstOrDefaultAsync(ct);
         if (command == null) throw new NotFoundException("Команда не существует");
 
         var placeholder = await context.CommandPlaceholders
@@ -177,7 +182,9 @@ public class CommandService(AppDbContext context) : ICommandService
         int index,
         CancellationToken ct)
     {
-        var command = await _getCommandQuery(context, commandId, userId).FirstOrDefaultAsync(ct);
+        var command = await _getCommandQuery(context, commandId, userId)
+            .Where(c => !c.IsSystem)
+            .FirstOrDefaultAsync(ct);
         if (command == null) throw new NotFoundException("Команда не существует");
 
         var placeholder = await context.CommandPlaceholders

@@ -4,9 +4,9 @@ namespace Application.Interfaces;
 
 public interface IApiKeyService
 {
+    Task<ApiKeyDto> Generate(Guid agentId, int daysToRevoke, CancellationToken ct);
+    Task<Guid?> GetOwnerIdByApiKey(string apiKey, CancellationToken ct = default);
     Task<bool> Validate(string apiKey, CancellationToken ct = default);
-    Task<Guid?> GetOwnerId(string apiKey, CancellationToken ct = default);
-    Task<ApiKeyDto> Generate(string name, Guid userId, CancellationToken ct);
-    Task Revoke(Guid id, Guid userid, CancellationToken ct);
-    Task<IEnumerable<ApiKeyDto>> GetKeys(Guid userId, CancellationToken ct);
+    Task Revoke(Guid id, Guid agentId, CancellationToken ct);
+    Task<ApiKeySmallDto> GetKey(Guid agentId, CancellationToken ct);
 }

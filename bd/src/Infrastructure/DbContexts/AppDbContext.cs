@@ -16,6 +16,8 @@ public partial class AppDbContext : DbContext
     public DbSet<AgentTask> AgentTasks { get; set; }
     public DbSet<Command> Commands { get; set; }
     public DbSet<CommandPlaceholder> CommandPlaceholders { get; set; }
+    public DbSet<Scenario> Scenarios { get; set; }
+    public DbSet<ScenarioCommand> ScenarioCommands { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

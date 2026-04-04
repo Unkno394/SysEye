@@ -42,4 +42,10 @@ public static class HangfireConfigurationExtension
 
         return app;
     }
+
+    public static IServiceCollection AddRecurringJobs(this IServiceCollection services)
+    {
+        services.AddSingleton<IHostedService, RecurringJobsSetup>();
+        return services;
+    }
 }

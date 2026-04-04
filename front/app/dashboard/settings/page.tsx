@@ -3,11 +3,12 @@
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { Mail, UserRound } from "lucide-react";
+import { AgentMetricsDashboard } from "@/components/agent-metrics-dashboard";
 import { EmailConfirmationPanel } from "@/components/email-confirmation-panel";
-import { GlassCard, PrimaryButton, SectionTitle } from "@/components/ui";
+import { GlassCard, PrimaryButton, SectionTitle, StatusBadge } from "@/components/ui";
 import { apiJson } from "@/lib/api-client";
-import type { Role, UserInfo } from "@/lib/backend-types";
-import { getRoleLabel } from "@/lib/backend-types";
+import type { AgentDto, AgentMetricsDto, PagedResult, Role, UserInfo } from "@/lib/backend-types";
+import { getAgentStatus, getDistributionLabel, getRoleLabel } from "@/lib/backend-types";
 import { saveSessionProfile } from "@/lib/session-profile";
 import { cn } from "@/lib/utils";
 
@@ -18,6 +19,13 @@ export default function SettingsPage() {
   const [profileLoading, setProfileLoading] = useState(true);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileMessage, setProfileMessage] = useState<string | null>(null);
+  const [agentsLoading, setAgentsLoading] = useState(true);
+  const [metricsLoading, setMetricsLoading] = useState(false);
+  const [metricsError, setMetricsError] = useState<string | null>(null);
+  const [availableAgents, setAvailableAgents] = useState<AgentDto[]>([]);
+  const [selectedMetricsAgentId, setSelectedMetricsAgentId] = useState("");
+  const [metrics, setMetrics] = useState<AgentMetricsDto | null>(null);
+  const [metricsAgentQuery, setMetricsAgentQuery] = useState("");
   const [role, setRole] = useState<Role>(0);
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -70,9 +78,110 @@ export default function SettingsPage() {
 
   useEffect(() => {
     void loadProfile();
+    void loadAgents();
+
+    const intervalId = window.setInterval(() => {
+      void loadAgents(true);
+    }, 15_000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
   }, []);
 
   const fullName = useMemo(() => `${firstName} ${lastName}`.trim(), [firstName, lastName]);
+
+  const loadAgents = async (background = false) => {
+    if (!background) {
+      setAgentsLoading(true);
+    }
+
+    try {
+      const data = await apiJson<PagedResult<AgentDto>>("/api/hackaton/agent?take=100&skip=0", { method: "GET" }, "Не удалось загрузить список агентов.");
+      const nextAgents = data.items ?? [];
+      setAvailableAgents(nextAgents);
+
+      setSelectedMetricsAgentId((current) => {
+        if (current && nextAgents.some((agent) => agent.id === current)) {
+          return current;
+        }
+
+        return nextAgents[0]?.id ?? "";
+      });
+    } catch (loadError) {
+      setMetricsError(loadError instanceof Error ? loadError.message : "Не удалось загрузить список агентов.");
+    } finally {
+      if (!background) {
+        setAgentsLoading(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedMetricsAgentId) {
+      setMetrics(null);
+      return;
+    }
+
+    let active = true;
+
+    const loadMetrics = async () => {
+      setMetricsLoading(true);
+      setMetricsError(null);
+
+      try {
+        const data = await apiJson<AgentMetricsDto>(
+          `/api/hackaton/agent/${selectedMetricsAgentId}/metrics`,
+          { method: "GET" },
+          "Не удалось загрузить метрики агента.",
+        );
+
+        if (active) {
+          setMetrics(data);
+        }
+      } catch (loadError) {
+        if (active) {
+          setMetrics(null);
+          setMetricsError(loadError instanceof Error ? loadError.message : "Не удалось загрузить метрики агента.");
+        }
+      } finally {
+        if (active) {
+          setMetricsLoading(false);
+        }
+      }
+    };
+
+    void loadMetrics();
+
+    const intervalId = window.setInterval(() => {
+      void loadMetrics();
+    }, 15_000);
+
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+    };
+  }, [selectedMetricsAgentId]);
+
+  const filteredMetricsAgents = useMemo(() => {
+    const normalizedQuery = metricsAgentQuery.trim().toLowerCase();
+    if (!normalizedQuery) {
+      return availableAgents;
+    }
+
+    return availableAgents.filter((agent) => {
+      const searchText = [agent.name, getDistributionLabel(agent.distribution, agent.os), agent.ipAddress ?? ""]
+        .join(" ")
+        .toLowerCase();
+
+      return searchText.includes(normalizedQuery);
+    });
+  }, [availableAgents, metricsAgentQuery]);
+
+  const selectedMetricsAgent = useMemo(
+    () => availableAgents.find((agent) => agent.id === selectedMetricsAgentId) ?? null,
+    [availableAgents, selectedMetricsAgentId],
+  );
 
   const handleProfileSave = async () => {
     setProfileError(null);
@@ -241,6 +350,90 @@ export default function SettingsPage() {
           </div>
         </GlassCard>
       </div>
+
+      <section>
+        <SectionTitle
+          title="Метрики удалённых машин"
+          subtitle="Выбирай агент и смотри статистику по запускам, ошибкам и времени выполнения в одном месте."
+        />
+
+        <div className="grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
+          <GlassCard className="p-5">
+            <div className="text-sm font-medium text-white">Выбор машины</div>
+            <p className="mt-2 text-sm leading-6 text-white/55">
+              Выбери нужный удалённый ПК и справа откроется его dashboard со статистикой задач.
+            </p>
+
+            <input
+              value={metricsAgentQuery}
+              onChange={(event) => setMetricsAgentQuery(event.target.value)}
+              placeholder="Поиск по имени, платформе или IP"
+              className="mt-5 w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white outline-none placeholder:text-white/30 focus:border-accent/25"
+            />
+
+            <div className="mt-4 max-h-[620px] space-y-3 overflow-y-auto pr-1">
+              {filteredMetricsAgents.map((agent) => {
+                const status = getAgentStatus(agent.lastHeartbeatAt);
+                const selected = agent.id === selectedMetricsAgentId;
+                const machineMeta = [getDistributionLabel(agent.distribution, agent.os), agent.ipAddress || null].filter(Boolean).join(" · ");
+
+                return (
+                  <button
+                    key={agent.id}
+                    type="button"
+                    onClick={() => setSelectedMetricsAgentId(agent.id)}
+                    className={`w-full rounded-[1.55rem] border p-4 text-left transition ${
+                      selected
+                        ? "border-accent/25 bg-accent/[0.08]"
+                        : "border-white/8 bg-black/20 hover:border-white/15 hover:bg-white/[0.04]"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-medium text-white">{agent.name}</div>
+                        <div className="mt-1 text-sm text-white/50">{machineMeta || "Параметры машины появятся позже."}</div>
+                      </div>
+                      <StatusBadge status={status} />
+                    </div>
+                  </button>
+                );
+              })}
+
+              {!filteredMetricsAgents.length ? (
+                <div className="rounded-[1.55rem] border border-dashed border-white/10 px-4 py-10 text-center text-sm text-white/40">
+                  По запросу ничего не найдено.
+                </div>
+              ) : null}
+
+              {!availableAgents.length && !agentsLoading ? (
+                <div className="rounded-[1.55rem] border border-dashed border-white/10 px-4 py-10 text-center text-sm text-white/40">
+                  Агентов пока нет.
+                </div>
+              ) : null}
+            </div>
+          </GlassCard>
+
+          <AgentMetricsDashboard
+            metrics={metrics}
+            loading={agentsLoading || metricsLoading}
+            title="Метрики агента"
+            subtitle="Запуски, средняя длительность, ошибки за сегодня и динамика по дням."
+            agentName={selectedMetricsAgent?.name ?? null}
+            agentMeta={selectedMetricsAgent ? [getDistributionLabel(selectedMetricsAgent.distribution, selectedMetricsAgent.os), selectedMetricsAgent.ipAddress || null].filter(Boolean).join(" · ") : null}
+            emptyMessage={
+              selectedMetricsAgentId
+                ? "Метрики пока недоступны."
+                : "Выбери удалённую машину слева, чтобы увидеть статистику."
+            }
+          />
+        </div>
+
+        {metricsError ? (
+          <div className="mt-4 rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-100/90">
+            {metricsError}
+          </div>
+        ) : null}
+      </section>
 
       {passwordModalOpen ? (
         <SettingsModal

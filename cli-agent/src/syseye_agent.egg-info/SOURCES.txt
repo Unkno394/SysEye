@@ -8,6 +8,7 @@ src/syseye_agent/api.py
 src/syseye_agent/cli.py
 src/syseye_agent/config.py
 src/syseye_agent/executor.py
+src/syseye_agent/realtime.py
 src/syseye_agent/service.py
 src/syseye_agent.egg-info/PKG-INFO
 src/syseye_agent.egg-info/SOURCES.txt

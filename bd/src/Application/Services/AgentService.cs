@@ -7,7 +7,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace Application.Services;
 
-public class AgentService(AppDbContext context) : IAgentService
+public class AgentService(AppDbContext context, IRealtimeNotifier realtimeNotifier) : IAgentService
 {
     private static readonly Func<AppDbContext, Guid, Guid, IQueryable<Agent>> _getAgentQuery = (ctx, agentId, userId) =>
         ctx.Agents.Where(a => a.Id == agentId && a.UserId == userId && !a.IsDeleted);
@@ -26,7 +26,6 @@ public class AgentService(AppDbContext context) : IAgentService
     public async Task<Agent> Create(
         Guid userId,
         string name,
-        string? ipAddress,
         OsType? os,
         CancellationToken ct)
     {
@@ -36,7 +35,6 @@ public class AgentService(AppDbContext context) : IAgentService
         var agent = new Agent
         {
             Name = name.Trim(),
-            IpAddress = ipAddress?.Trim(),
             Os = os,
             UserId = userId,
             LastHeartbeatAt = DateTime.UtcNow
@@ -44,6 +42,7 @@ public class AgentService(AppDbContext context) : IAgentService
 
         context.Agents.Add(agent);
         await context.SaveChangesAsync(ct);
+        await realtimeNotifier.NotifyAgentUpdatedAsync(userId, MapAgentDto(agent), ct);
         return agent;
     }
 
@@ -67,7 +66,6 @@ public class AgentService(AppDbContext context) : IAgentService
 
         return agent;
     }
-
 
     public async Task<PagedResult<AgentDto>> GetUserAgents(Guid userId, int take, int skip, CancellationToken ct)
     {
@@ -122,6 +120,7 @@ public class AgentService(AppDbContext context) : IAgentService
             agent.Os = os.Value;
 
         await context.SaveChangesAsync(ct);
+        await realtimeNotifier.NotifyAgentUpdatedAsync(userId, MapAgentDto(agent), ct);
         return true;
     }
 
@@ -132,6 +131,7 @@ public class AgentService(AppDbContext context) : IAgentService
 
         agent.IsDeleted = true;
         await context.SaveChangesAsync(ct);
+        await realtimeNotifier.NotifyAgentDeletedAsync(userId, agentId, ct);
         return true;
     }
 
@@ -143,6 +143,7 @@ public class AgentService(AppDbContext context) : IAgentService
         agent.LastHeartbeatAt = DateTime.UtcNow;
 
         await context.SaveChangesAsync(ct);
+        await realtimeNotifier.NotifyAgentUpdatedAsync(userId, MapAgentDto(agent), ct);
         return agent.LastHeartbeatAt;
     }
 
@@ -163,6 +164,7 @@ public class AgentService(AppDbContext context) : IAgentService
             agent.Distribution = distribution.Trim();
 
         await context.SaveChangesAsync(ct);
+        await realtimeNotifier.NotifyAgentUpdatedAsync(userId, MapAgentDto(agent), ct);
         return agent.LastHeartbeatAt;
     }
 
@@ -212,7 +214,7 @@ public class AgentService(AppDbContext context) : IAgentService
         }
 
         await context.SaveChangesAsync(ct);
-
+        await realtimeNotifier.NotifyAgentUpdatedAsync(userId, MapAgentDto(agent), ct);
         return MapAgentDto(agent);
     }
 }

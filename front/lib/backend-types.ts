@@ -1,18 +1,20 @@
 export type Role = 0 | 1 | 2;
 export type OsType = 0 | 1 | 2;
+export type AgentStatus = "online" | "offline";
+export type TaskStatus = "queued" | "running" | "success" | "error";
 
 export type PagedResult<T> = {
   items: T[];
   totalCount: number;
-  take: number;
   skip: number;
+  take: number;
 };
 
 export type UserInfo = {
   role: Role;
   name: string;
-  login: string;
-  email: string;
+  login?: string;
+  email?: string;
   isEmailConfirmed: boolean;
 };
 
@@ -42,7 +44,6 @@ export type CommandPlaceholderDto = {
 
 export type ApiKeyDto = {
   id: string;
-  name: string;
   value: string;
 };
 
@@ -53,24 +54,68 @@ export type AgentConnectionTokenDto = {
 export type AgentTaskDto = {
   id: string;
   title: string;
-  status: "queued" | "running" | "success" | "error";
+  status: TaskStatus;
   output: string;
   error: string;
   exitCode?: number | null;
   createdAt: string;
 };
 
-export type AgentStatus = "online" | "offline" | "busy";
+export type AgentMetricsPointDto = {
+  date: string;
+  totalRuns: number;
+  successRuns: number;
+  errorRuns: number;
+  averageDurationSeconds: number;
+};
+
+export type AgentMetricsDto = {
+  agentId: string;
+  totalRuns: number;
+  successfulRuns: number;
+  failedRuns: number;
+  runningRuns: number;
+  queuedRuns: number;
+  runsToday: number;
+  errorsToday: number;
+  averageDurationSeconds: number;
+  successRate: number;
+  activity: AgentMetricsPointDto[];
+};
+
+export type ScenarioDto = {
+  id: string;
+  name: string;
+  description: string;
+  isSystem?: boolean;
+};
+
+export type ScenarioCommandDto = {
+  commandId: string;
+  commandName: string;
+  order: number;
+};
+
+export type ScenarioDetailsDto = {
+  id: string;
+  name: string;
+  description: string;
+  isSystem?: boolean;
+  commands: ScenarioCommandDto[];
+};
+
+function normalizeValue(value?: string | null) {
+  return String(value ?? "").trim().toLowerCase();
+}
 
 export function getOsLabel(os?: OsType | null) {
-  if (os === 1) return "Linux";
   if (os === 2) return "Windows";
+  if (os === 1) return "Linux";
   return "Не указана";
 }
 
 export function getDistributionKey(distribution?: string | null, os?: OsType | null) {
-  const value = (distribution || "").trim().toLowerCase();
-
+  const value = normalizeValue(distribution);
   if (!value) {
     if (os === 2) return "windows";
     if (os === 1) return "linux";
@@ -84,17 +129,18 @@ export function getDistributionKey(distribution?: string | null, os?: OsType | n
   if (value.includes("manjaro")) return "manjaro";
   if (value.includes("kali")) return "kali";
   if (value.includes("alpine")) return "alpine";
-  if (value.includes("opensuse") || value.includes("suse")) return "opensuse";
+  if (value.includes("opensuse") || value.includes("open suse") || value.includes("suse")) return "opensuse";
   if (value.includes("pop")) return "pop";
   if (value.includes("windows")) return "windows";
-  if (value.includes("darwin") || value.includes("mac")) return "macos";
+  if (value.includes("mac")) return "macos";
   if (value.includes("linux")) return "linux";
-
   return value;
 }
 
 export function getDistributionLabel(distribution?: string | null, os?: OsType | null) {
-  switch (getDistributionKey(distribution, os)) {
+  const key = getDistributionKey(distribution, os);
+
+  switch (key) {
     case "arch":
       return "Arch Linux";
     case "ubuntu":
@@ -124,31 +170,35 @@ export function getDistributionLabel(distribution?: string | null, os?: OsType |
   }
 }
 
-export function getRoleLabel(role?: Role) {
-  if (role === 2) return "Администратор";
-  if (role === 1) return "Модератор";
-  return "Пользователь";
+export function getRoleLabel(role: Role) {
+  switch (role) {
+    case 2:
+      return "Администратор";
+    case 1:
+      return "Модератор";
+    default:
+      return "Пользователь";
+  }
 }
 
-export function getAgentStatus(lastHeartbeatAt?: string): AgentStatus {
+export function getAgentStatus(lastHeartbeatAt?: string | null): AgentStatus {
   if (!lastHeartbeatAt) return "offline";
 
-  const heartbeatMs = new Date(lastHeartbeatAt).getTime();
-  if (Number.isNaN(heartbeatMs)) return "offline";
+  const timestamp = new Date(lastHeartbeatAt);
+  if (Number.isNaN(timestamp.getTime())) return "offline";
 
-  const diffMinutes = (Date.now() - heartbeatMs) / 60000;
-  return diffMinutes <= 5 ? "online" : "offline";
+  return Date.now() - timestamp.getTime() <= 45_000 ? "online" : "offline";
 }
 
-export function getRelativeHeartbeatLabel(lastHeartbeatAt?: string) {
-  if (!lastHeartbeatAt) return "неизвестно";
+export function getRelativeHeartbeatLabel(lastHeartbeatAt?: string | null) {
+  if (!lastHeartbeatAt) return "нет данных";
 
-  const heartbeatMs = new Date(lastHeartbeatAt).getTime();
-  if (Number.isNaN(heartbeatMs)) return "неизвестно";
+  const timestamp = new Date(lastHeartbeatAt);
+  if (Number.isNaN(timestamp.getTime())) return "нет данных";
 
-  const diffSeconds = Math.max(0, Math.floor((Date.now() - heartbeatMs) / 1000));
+  const diffSeconds = Math.max(0, Math.floor((Date.now() - timestamp.getTime()) / 1000));
 
-  if (diffSeconds < 10) return "только что";
+  if (diffSeconds < 5) return "только что";
   if (diffSeconds < 60) return `${diffSeconds} сек назад`;
 
   const diffMinutes = Math.floor(diffSeconds / 60);

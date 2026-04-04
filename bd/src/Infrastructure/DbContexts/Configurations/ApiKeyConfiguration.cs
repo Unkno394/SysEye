@@ -14,28 +14,37 @@ public class ApiKeyConfiguration : IEntityTypeConfiguration<ApiKey>
 
         builder.Property(x => x.Id)
             .HasColumnType("uuid")
-            .ValueGeneratedNever();
+            .ValueGeneratedNever()
+            .IsRequired();
 
-        builder.Property(x => x.Name)
-            .IsRequired()
-            .HasMaxLength(50)
-            .HasColumnType("varchar(50)");
+        builder.Property(x => x.AgentId)
+            .HasColumnType("uuid");
+
+        builder.Property(x => x.UserId)
+            .HasColumnType("uuid");
 
         builder.Property(x => x.Value)
             .IsRequired()
-            .HasMaxLength(50)
-            .HasColumnType("varchar(50)");
+            .HasMaxLength(500)
+            .HasColumnType("varchar(500)");
 
-        builder.Property(x => x.IsRevoked)
-            .HasDefaultValue(false);
+        builder.Property(x => x.RevokedAt)
+            .HasColumnType("timestamp with time zone");
 
-        builder.Property(x => x.IsDeleted)
-            .HasDefaultValue(false);
+        builder.HasOne(x => x.Agent)
+            .WithMany()
+            .HasForeignKey(x => x.AgentId)
+            .OnDelete(DeleteBehavior.Cascade)
+            .IsRequired(false);
 
-        builder.Property(x => x.UserId)
-            .IsRequired()
-            .HasColumnType("uuid");
+        builder.HasIndex(x => x.AgentId)
+            .HasDatabaseName("IX_api_keys_agent_id");
 
-        builder.HasOne(x => x.User);
+        builder.HasIndex(x => x.Value)
+            .IsUnique()
+            .HasDatabaseName("IX_api_keys_value");
+
+        builder.HasIndex(x => x.RevokedAt)
+            .HasDatabaseName("IX_api_keys_revoked_at");
     }
 }

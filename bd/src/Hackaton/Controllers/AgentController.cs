@@ -1,9 +1,9 @@
-﻿using Application.DTO;
+﻿using System.Text;
+using System.Text.Json;
+using Application.DTO;
 using Application.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using System.Text;
-using System.Text.Json;
 using Web.Contracts.Requests;
 using Web.Extensions;
 
@@ -25,16 +25,12 @@ public class AgentController(IAgentService agentService, IApiKeyService apiKeySe
         var agent = await agentService.Create(
             User.GetUserId(),
             request.Name,
-            request.IpAddress,
             request.Os,
             ct);
 
         return Ok(agent.Id);
     }
 
-    /// <summary>
-    /// Выпускает токен подключения CLI для конкретного агента.
-    /// </summary>
     [HttpGet("{id}/connection-token")]
     [Produces(typeof(AgentConnectionTokenDto))]
     public async Task<ActionResult<AgentConnectionTokenDto>> GetConnectionToken(Guid id, CancellationToken ct)
@@ -43,7 +39,7 @@ public class AgentController(IAgentService agentService, IApiKeyService apiKeySe
 
         if (agent == null) return NotFound();
 
-        var apiKey = await apiKeyService.Generate($"CLI · {agent.Name}", User.GetUserId(), ct);
+        var apiKey = await apiKeyService.Generate(agent.Id, 3650, ct);
         var payload = new
         {
             v = 1,
@@ -129,11 +125,27 @@ public class AgentController(IAgentService agentService, IApiKeyService apiKeySe
         return Ok(task);
     }
 
+    [HttpPost("{id}/tasks/scenario/{scenarioId}")]
+    [Produces(typeof(List<AgentTaskDto>))]
+    public async Task<ActionResult<List<AgentTaskDto>>> QueueScenario(Guid id, Guid scenarioId, CancellationToken ct)
+    {
+        var tasks = await taskService.EnqueueScenarioAsync(id, User.GetUserId(), scenarioId, ct);
+        return Ok(tasks);
+    }
+
     [HttpGet("{id}/tasks")]
     [Produces(typeof(PagedResult<AgentTaskDto>))]
     public async Task<ActionResult<PagedResult<AgentTaskDto>>> GetTasks(Guid id, [FromQuery] PagedRequest request, CancellationToken ct)
     {
         var tasks = await taskService.GetAgentTasksAsync(id, User.GetUserId(), request.Take, request.Skip, ct);
         return Ok(tasks);
+    }
+
+    [HttpGet("{id}/metrics")]
+    [Produces(typeof(AgentMetricsDto))]
+    public async Task<ActionResult<AgentMetricsDto>> GetMetrics(Guid id, CancellationToken ct)
+    {
+        var metrics = await taskService.GetAgentMetricsAsync(id, User.GetUserId(), ct);
+        return Ok(metrics);
     }
 }
