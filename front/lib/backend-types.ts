@@ -36,6 +36,7 @@ export type CommandDto = {
   bashScript: string;
   powerShellScript: string;
   isSystem: boolean;
+  logRegex?: string | null;
 };
 
 export type CommandPlaceholderDto = {
@@ -46,6 +47,11 @@ export type CommandPlaceholderDto = {
 export type ApiKeyDto = {
   id: string;
   value: string;
+};
+
+export type ApiKeyInfoDto = {
+  id: string;
+  revokedAt: string;
 };
 
 export type AgentConnectionTokenDto = {
@@ -87,6 +93,29 @@ export type ExecutionLogDto = {
   durationSeckonds?: number;
   commandId?: string | null;
   category?: string | null;
+};
+
+export type AnalyticsDto = {
+  executions: number;
+  errors: number;
+  successRate: number;
+  averageDurationSeconds: number;
+  minDurationSeconds: number;
+  maxDurationSeconds: number;
+};
+
+export type AgentAnalyticsDto = {
+  agentId: string;
+  agentName?: string | null;
+  total?: AnalyticsDto | null;
+  today?: AnalyticsDto | null;
+};
+
+export type CommandAnalyticsDto = {
+  commandId: string;
+  commandName?: string | null;
+  total?: AnalyticsDto | null;
+  today?: AnalyticsDto | null;
 };
 
 export type AgentMetricsPointDto = {

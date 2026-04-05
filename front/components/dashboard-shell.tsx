@@ -34,7 +34,7 @@ const terminalBackgroundProps = {
 
 export function DashboardShell({ children }: { children: ReactNode }) {
   const router = useRouter();
-  const pathname = usePathname();
+  const pathname = usePathname() ?? "";
   const [userName, setUserName] = useState("");
   const [userEmail, setUserEmail] = useState("");
   const [loggingOut, setLoggingOut] = useState(false);

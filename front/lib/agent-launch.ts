@@ -5,6 +5,8 @@ const WINDOWS_PATH_REFRESH_NOTE = "After running ensurepath, open a new PowerShe
 const WINDOWS_SERVICE_ENABLE_COMMAND = "powershell -ExecutionPolicy Bypass -File .\\install-syseye-agent.ps1";
 const LINUX_SERVICE_ENABLE_COMMAND = "systemctl --user daemon-reload && systemctl --user enable --now syseye-agent.service";
 
+export type AgentLaunchPlatform = "linux" | "windows";
+
 function escapePowerShellSingleQuoted(value: string) {
   return value.replaceAll("'", "''");
 }
@@ -13,8 +15,28 @@ function escapePosixSingleQuoted(value: string) {
   return value.replaceAll("'", "'\"'\"'");
 }
 
+function normalizeServerUrl(value?: string | null) {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed) {
+    return DEFAULT_AGENT_SERVER_URL;
+  }
+
+  try {
+    const url = new URL(trimmed);
+    if (url.pathname.endsWith("/swagger/index.html")) {
+      url.pathname = "/";
+      url.search = "";
+      url.hash = "";
+    }
+
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return trimmed.replace(/\/swagger\/index\.html$/i, "").replace(/\/$/, "");
+  }
+}
+
 export function getDefaultAgentServerUrl() {
-  return DEFAULT_AGENT_SERVER_URL;
+  return normalizeServerUrl(process.env.NEXT_PUBLIC_AGENT_SERVER_URL);
 }
 
 export function getCliInstallCommand() {
@@ -37,7 +59,29 @@ export function getLinuxServiceEnableCommand() {
   return LINUX_SERVICE_ENABLE_COMMAND;
 }
 
+export function inferLocalAgentPlatform(): AgentLaunchPlatform {
+  if (typeof window === "undefined") {
+    return "linux";
+  }
+
+  const fingerprint = `${window.navigator.userAgent} ${window.navigator.platform}`.toLowerCase();
+  if (fingerprint.includes("win")) {
+    return "windows";
+  }
+
+  return "linux";
+}
+
+export function getOsTypeForPlatform(platform: AgentLaunchPlatform): 1 | 2 {
+  return platform === "windows" ? 2 : 1;
+}
+
 export function inferAgentServerUrl() {
+  const fromEnv = normalizeServerUrl(process.env.NEXT_PUBLIC_AGENT_SERVER_URL);
+  if (fromEnv && fromEnv !== DEFAULT_AGENT_SERVER_URL) {
+    return fromEnv;
+  }
+
   if (typeof window === "undefined") {
     return DEFAULT_AGENT_SERVER_URL;
   }
@@ -51,18 +95,22 @@ export function inferAgentServerUrl() {
 }
 
 export function buildLinuxServiceGenerateCommand(serverUrl: string, token: string) {
-  return `syseye-agent service linux --server ${serverUrl} --token "${token}" > ~/.config/systemd/user/syseye-agent.service`;
+  const normalizedServerUrl = normalizeServerUrl(serverUrl);
+  return `syseye-agent service linux --server ${normalizedServerUrl} --token "${token}" > ~/.config/systemd/user/syseye-agent.service`;
 }
 
 export function buildWindowsInstallScriptContent(serverUrl: string, token: string) {
-  const escapedServer = escapePowerShellSingleQuoted(serverUrl);
+  const normalizedServerUrl = normalizeServerUrl(serverUrl);
+  const escapedServer = escapePowerShellSingleQuoted(normalizedServerUrl);
   const escapedToken = escapePowerShellSingleQuoted(token);
+  const escapedLaunchUrl = escapePowerShellSingleQuoted(buildAgentReconnectUrl(normalizedServerUrl, token));
 
   return `$ErrorActionPreference = "Stop"
 $startupDir = [Environment]::GetFolderPath("Startup")
 $launcherDir = Join-Path $env:USERPROFILE ".syseye-agent"
 $protocolLauncherPath = Join-Path $launcherDir "open-url.ps1"
 $agentPath = Join-Path $env:USERPROFILE ".local\\bin\\syseye-agent.exe"
+$logFile = Join-Path $launcherDir "agent.log"
 
 New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null
 
@@ -77,10 +125,11 @@ if (-not (Test-Path $agentPath)) {
 
 $server = '${escapedServer}'
 $token = '${escapedToken}'
+$launchUrl = '${escapedLaunchUrl}'
 $startupScriptPath = Join-Path $startupDir "SysEye Agent.vbs"
 $protocolRoot = "HKCU:\\Software\\Classes\\syseye-agent"
 $protocolCommandKey = Join-Path $protocolRoot "shell\\open\\command"
-$runCommand = '"' + $agentPath + '" connect --server "' + $server + '" --token "' + $token + '"'
+$runCommand = '"' + $agentPath + '" open-url "' + $launchUrl + '" --log-file "' + $logFile + '"'
 $protocolScript = @'
 param(
   [Parameter(Mandatory = $true)]
@@ -90,6 +139,9 @@ param(
 $ErrorActionPreference = "Stop"
 $launcherDir = Join-Path $env:USERPROFILE ".syseye-agent"
 $agentPath = Join-Path $env:USERPROFILE ".local\\bin\\syseye-agent.exe"
+$logFile = Join-Path $launcherDir "agent.log"
+
+New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null
 
 if (-not (Test-Path $agentPath)) {
   $command = Get-Command syseye-agent -ErrorAction SilentlyContinue
@@ -100,36 +152,7 @@ if (-not (Test-Path $agentPath)) {
   }
 }
 
-$parsed = [Uri]$Url
-$commandName = if ($parsed.Host) { $parsed.Host } else { $parsed.AbsolutePath.Trim("/") }
-if ($parsed.Scheme -ne "syseye-agent") {
-  throw "Unsupported URL scheme: $($parsed.Scheme)"
-}
-
-if ($commandName -notin @("connect", "run")) {
-  throw "Unsupported SysEye URL command: $commandName"
-}
-
-$query = @{}
-foreach ($pair in $parsed.Query.TrimStart('?').Split('&', [System.StringSplitOptions]::RemoveEmptyEntries)) {
-  $parts = $pair.Split('=', 2)
-  $name = [Uri]::UnescapeDataString($parts[0].Replace('+', ' '))
-  $value = if ($parts.Count -gt 1) { [Uri]::UnescapeDataString($parts[1].Replace('+', ' ')) } else { "" }
-  $query[$name] = $value
-}
-
-$server = $query["server"]
-$token = $query["token"]
-
-if (-not $server) {
-  throw "Missing server parameter."
-}
-
-if (-not $token) {
-  throw "Missing token parameter."
-}
-
-Start-Process -WindowStyle Hidden -FilePath $agentPath -ArgumentList @('connect', '--server', $server, '--token', $token)
+Start-Process -WindowStyle Hidden -FilePath $agentPath -ArgumentList @('open-url', $Url, '--log-file', $logFile)
 '@
 $protocolCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $protocolLauncherPath + '" "%1"'
 $vbsContent = @"
@@ -144,13 +167,14 @@ Set-Item -Path $protocolRoot -Value "URL:SysEye Agent Protocol"
 New-ItemProperty -Path $protocolRoot -Name "URL Protocol" -Value "" -PropertyType String -Force | Out-Null
 New-Item -Path $protocolCommandKey -Force | Out-Null
 Set-Item -Path $protocolCommandKey -Value $protocolCommand
-Start-Process -WindowStyle Hidden -FilePath $agentPath -ArgumentList @('connect', '--server', $server, '--token', $token)
+Start-Process -WindowStyle Hidden -FilePath $agentPath -ArgumentList @('open-url', $launchUrl, '--log-file', $logFile)
 Write-Host "SysEye Agent autostart installed to Startup folder, custom reconnect link registered, and agent started."`;
 }
 
 export function buildAgentReconnectUrl(serverUrl: string, token: string) {
+  const normalizedServerUrl = normalizeServerUrl(serverUrl);
   const params = new URLSearchParams({
-    server: serverUrl,
+    server: normalizedServerUrl,
     token,
   });
 
@@ -158,12 +182,15 @@ export function buildAgentReconnectUrl(serverUrl: string, token: string) {
 }
 
 export function buildReconnectCommand(serverUrl: string, token: string, os?: number | null) {
+  const normalizedServerUrl = normalizeServerUrl(serverUrl);
   if (os === 1) {
-    return `nohup syseye-agent connect --server '${escapePosixSingleQuoted(serverUrl)}' --token '${escapePosixSingleQuoted(token)}' >/dev/null 2>&1 &`;
+    return `syseye-agent connect --server '${escapePosixSingleQuoted(normalizedServerUrl)}' --token '${escapePosixSingleQuoted(token)}' --background`;
   }
 
-  const escapedServer = escapePowerShellSingleQuoted(serverUrl);
-  const escapedToken = escapePowerShellSingleQuoted(token);
+  const escapedLaunchUrl = escapePowerShellSingleQuoted(buildAgentReconnectUrl(normalizedServerUrl, token));
   return `$agentPath = (Get-Command syseye-agent -ErrorAction Stop).Source
-Start-Process -WindowStyle Hidden -FilePath $agentPath -ArgumentList @('connect', '--server', '${escapedServer}', '--token', '${escapedToken}')`;
+$launcherDir = Join-Path $env:USERPROFILE ".syseye-agent"
+$logFile = Join-Path $launcherDir "agent.log"
+New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null
+Start-Process -WindowStyle Hidden -FilePath $agentPath -ArgumentList @('open-url', '${escapedLaunchUrl}', '--log-file', $logFile)`;
 }

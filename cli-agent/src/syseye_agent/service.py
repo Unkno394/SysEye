@@ -3,6 +3,7 @@ from __future__ import annotations
 import shlex
 import sys
 from textwrap import dedent
+from urllib.parse import urlencode
 
 
 def build_linux_systemd_unit(server: str, token: str) -> str:
@@ -36,6 +37,8 @@ def build_linux_systemd_unit(server: str, token: str) -> str:
 def build_windows_task_script(server: str, token: str) -> str:
     escaped_server = server.replace("'", "''")
     escaped_token = token.replace("'", "''")
+    launch_url = f"syseye-agent://connect?{urlencode({'server': server, 'token': token})}"
+    escaped_launch_url = launch_url.replace("'", "''")
 
     return dedent(
         f"""\
@@ -44,6 +47,7 @@ def build_windows_task_script(server: str, token: str) -> str:
         $launcherDir = Join-Path $env:USERPROFILE ".syseye-agent"
         $protocolLauncherPath = Join-Path $launcherDir "open-url.ps1"
         $agentPath = Join-Path $env:USERPROFILE ".local\\bin\\syseye-agent.exe"
+        $logFile = Join-Path $launcherDir "agent.log"
 
         New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null
 
@@ -58,10 +62,11 @@ def build_windows_task_script(server: str, token: str) -> str:
 
         $server = '{escaped_server}'
         $token = '{escaped_token}'
+        $launchUrl = '{escaped_launch_url}'
         $startupScriptPath = Join-Path $startupDir "SysEye Agent.vbs"
         $protocolRoot = "HKCU:\\Software\\Classes\\syseye-agent"
         $protocolCommandKey = Join-Path $protocolRoot "shell\\open\\command"
-        $runCommand = '"' + $agentPath + '" connect --server "' + $server + '" --token "' + $token + '"'
+        $runCommand = '"' + $agentPath + '" open-url "' + $launchUrl + '" --log-file "' + $logFile + '"'
         $protocolScript = @'
         param(
           [Parameter(Mandatory = $true)]
@@ -71,6 +76,9 @@ def build_windows_task_script(server: str, token: str) -> str:
         $ErrorActionPreference = "Stop"
         $launcherDir = Join-Path $env:USERPROFILE ".syseye-agent"
         $agentPath = Join-Path $env:USERPROFILE ".local\\bin\\syseye-agent.exe"
+        $logFile = Join-Path $launcherDir "agent.log"
+
+        New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null
 
         if (-not (Test-Path $agentPath)) {{
           $command = Get-Command syseye-agent -ErrorAction SilentlyContinue
@@ -81,36 +89,7 @@ def build_windows_task_script(server: str, token: str) -> str:
           }}
         }}
 
-        $parsed = [Uri]$Url
-        $commandName = if ($parsed.Host) {{ $parsed.Host }} else {{ $parsed.AbsolutePath.Trim("/") }}
-        if ($parsed.Scheme -ne "syseye-agent") {{
-          throw "Unsupported URL scheme: $($parsed.Scheme)"
-        }}
-
-        if ($commandName -notin @("connect", "run")) {{
-          throw "Unsupported SysEye URL command: $commandName"
-        }}
-
-        $query = @{{}}
-        foreach ($pair in $parsed.Query.TrimStart('?').Split('&', [System.StringSplitOptions]::RemoveEmptyEntries)) {{
-          $parts = $pair.Split('=', 2)
-          $name = [Uri]::UnescapeDataString($parts[0].Replace('+', ' '))
-          $value = if ($parts.Count -gt 1) {{ [Uri]::UnescapeDataString($parts[1].Replace('+', ' ')) }} else {{ "" }}
-          $query[$name] = $value
-        }}
-
-        $server = $query["server"]
-        $token = $query["token"]
-
-        if (-not $server) {{
-          throw "Missing server parameter."
-        }}
-
-        if (-not $token) {{
-          throw "Missing token parameter."
-        }}
-
-        Start-Process -WindowStyle Hidden -FilePath $agentPath -ArgumentList @('connect', '--server', $server, '--token', $token)
+        Start-Process -WindowStyle Hidden -FilePath $agentPath -ArgumentList @('open-url', $Url, '--log-file', $logFile)
         '@
         $protocolCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $protocolLauncherPath + '" "%1"'
         $vbsContent = @"
@@ -125,7 +104,7 @@ def build_windows_task_script(server: str, token: str) -> str:
         New-ItemProperty -Path $protocolRoot -Name "URL Protocol" -Value "" -PropertyType String -Force | Out-Null
         New-Item -Path $protocolCommandKey -Force | Out-Null
         Set-Item -Path $protocolCommandKey -Value $protocolCommand
-        Start-Process -WindowStyle Hidden -FilePath $agentPath -ArgumentList @('connect', '--server', $server, '--token', $token)
+        Start-Process -WindowStyle Hidden -FilePath $agentPath -ArgumentList @('open-url', $launchUrl, '--log-file', $logFile)
         Write-Host "SysEye Agent autostart installed to Startup folder, custom reconnect link registered, and agent started."
         """
     )

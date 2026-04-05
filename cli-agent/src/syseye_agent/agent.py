@@ -117,6 +117,8 @@ class Agent:
         self.fetch_lock = threading.Lock()
         self.workers_started = False
         self.last_realtime_error = 0.0
+        self.internal_api_available = True
+        self.realtime_only_logged = False
 
     def _load_id(self) -> str | None:
         if self.state_path.exists():
@@ -127,6 +129,24 @@ class Agent:
         ensure_app_dir()
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.state_path.write_text(value, encoding="utf-8")
+
+    def _remember_agent_id(self, value: str | None) -> None:
+        resolved_id = (value or "").strip()
+        if not resolved_id:
+            return
+
+        self.agent_id = resolved_id
+        self._save_id(resolved_id)
+        if self.realtime is None or self.realtime.agent_id != resolved_id:
+            self._rebuild_realtime_client()
+
+    def _restore_token_agent(self) -> bool:
+        token_agent_id = (self.token.agent_id or "").strip()
+        if not token_agent_id:
+            return False
+
+        self._remember_agent_id(token_agent_id)
+        return True
 
     def _detect_ip_address(self) -> str | None:
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -171,7 +191,7 @@ class Agent:
 
     def register(self) -> None:
         if self.token.agent_id:
-            self.agent_id = self.token.agent_id
+            self._remember_agent_id(self.token.agent_id)
 
         resolved_name = self.token.name or self.hostname
 
@@ -187,11 +207,13 @@ class Agent:
             agent = self.api.register(payload)
             resolved_id = agent.get("id")
             if resolved_id:
-                self.agent_id = resolved_id
-                self._save_id(resolved_id)
-                self._rebuild_realtime_client()
+                self._remember_agent_id(str(resolved_id))
             print(f"[OK] agent registered: {self.agent_id}")
         except ApiError as exc:
+            if exc.status_code in {401, 404} and self._restore_token_agent():
+                self._switch_to_realtime_only(f"internal agent API returned {exc.status_code} during register")
+                return
+
             print(f"[ERR] register: {exc}")
         except Exception as exc:  # pragma: no cover - runtime safety
             print(f"[ERR] register: {exc}")
@@ -217,6 +239,15 @@ class Agent:
 
     def _log(self, message: str) -> None:
         print(message, flush=True)
+
+    def _switch_to_realtime_only(self, reason: str) -> None:
+        self.internal_api_available = False
+
+        if self.realtime_only_logged:
+            return
+
+        self.realtime_only_logged = True
+        self._log(f"[WARN] {reason}, relying on realtime only")
 
     @classmethod
     def _is_transient_result(cls, result: dict[str, str | int]) -> bool:
@@ -247,18 +278,38 @@ class Agent:
             "distribution": self.distribution,
         }
 
+        if not self.internal_api_available:
+            if self.realtime is not None and self.realtime.is_connected and self.realtime.supports_server_heartbeat:
+                try:
+                    self.realtime.send_heartbeat(payload)
+                except RealtimeClientError as exc:
+                    print(f"[ERR] heartbeat: {exc}")
+                    return
+
+            self.last_heartbeat = time.time()
+            return
+
         try:
             if self.realtime is not None and self.realtime.is_connected:
-                self.realtime.send_heartbeat(payload)
+                if self.realtime.supports_server_heartbeat:
+                    self.realtime.send_heartbeat(payload)
             else:
                 self.api.heartbeat(self.agent_id, payload)
             self.last_heartbeat = time.time()
         except ApiError as exc:
             if exc.status_code == 404:
+                if self._restore_token_agent():
+                    self._switch_to_realtime_only("internal heartbeat returned 404")
+                    return
+
                 self.agent_id = None
                 self.register()
                 return
             if exc.status_code == 401:
+                if self._restore_token_agent():
+                    self._switch_to_realtime_only("internal heartbeat returned 401")
+                    return
+
                 self.agent_id = None
                 self.register()
                 return
@@ -386,7 +437,7 @@ class Agent:
         worker.start()
 
     def _fill_capacity(self) -> None:
-        if not self.agent_id:
+        if not self.agent_id or not self.internal_api_available:
             return
 
         if not self.fetch_lock.acquire(blocking=False):
@@ -405,10 +456,18 @@ class Agent:
                 self.enqueue_command(task)
         except ApiError as exc:
             if exc.status_code == 404:
+                if self._restore_token_agent():
+                    self._switch_to_realtime_only("internal task polling returned 404")
+                    return
+
                 self.agent_id = self.token.agent_id
                 self.register()
                 return
             if exc.status_code == 401:
+                if self._restore_token_agent():
+                    self._switch_to_realtime_only("internal task polling returned 401")
+                    return
+
                 self.agent_id = None
                 self.register()
                 return
@@ -513,8 +572,6 @@ class Agent:
                     if not self.agent_id:
                         self.register()
 
-                    self.heartbeat()
-
                     if self.agent_id and self.realtime is None:
                         self._rebuild_realtime_client()
 
@@ -527,10 +584,18 @@ class Agent:
                                 self._log(f"[ERR] realtime connect: {exc}")
                                 self.last_realtime_error = now
 
+                    self.heartbeat()
+
                     if self.agent_id:
-                        self._fill_capacity()
+                        if self.realtime is None or not self.realtime.is_connected:
+                            self._fill_capacity()
                 except ApiError as exc:
                     if exc.status_code in {401, 404}:
+                        if self._restore_token_agent():
+                            self._log(f"[WARN] api fallback returned {exc.status_code}, keeping realtime path")
+                            time.sleep(max(1, self.config.poll_interval))
+                            continue
+
                         self.agent_id = self.token.agent_id
                         self.register()
                     else:

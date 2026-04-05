@@ -3,10 +3,11 @@
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { Mail, UserRound } from "lucide-react";
+import { AgentMetricsDashboard } from "@/components/agent-metrics-dashboard";
 import { EmailConfirmationPanel } from "@/components/email-confirmation-panel";
 import { GlassCard, PrimaryButton, SectionTitle, StatusBadge } from "@/components/ui";
 import { apiJson } from "@/lib/api-client";
-import type { AgentDto, PagedResult, Role, UserInfo } from "@/lib/backend-types";
+import type { AgentAnalyticsDto, AgentDto, AgentMetricsDto, PagedResult, Role, UserInfo } from "@/lib/backend-types";
 import { getAgentStatus, getDistributionLabel, getRelativeHeartbeatLabel, getRoleLabel } from "@/lib/backend-types";
 import { useClientRealtime } from "@/lib/client-realtime";
 import { saveSessionProfile } from "@/lib/session-profile";
@@ -15,13 +16,26 @@ import { cn } from "@/lib/utils";
 type PasswordMode = "old-password" | "email";
 type RecoveryStep = "request" | "confirm" | "reset";
 
+function formatPercent(value?: number | null) {
+  if (!Number.isFinite(value ?? NaN)) {
+    return "0%";
+  }
+
+  return `${Number(value).toFixed(1)}%`;
+}
+
 export default function SettingsPage() {
   const [profileLoading, setProfileLoading] = useState(true);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileMessage, setProfileMessage] = useState<string | null>(null);
   const [agentsLoading, setAgentsLoading] = useState(true);
+  const [agentAnalyticsLoading, setAgentAnalyticsLoading] = useState(false);
+  const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const [metricsError, setMetricsError] = useState<string | null>(null);
+  const [metricsLoading, setMetricsLoading] = useState(false);
   const [availableAgents, setAvailableAgents] = useState<AgentDto[]>([]);
+  const [agentAnalytics, setAgentAnalytics] = useState<AgentAnalyticsDto[]>([]);
+  const [agentMetrics, setAgentMetrics] = useState<AgentMetricsDto | null>(null);
   const [selectedMetricsAgentId, setSelectedMetricsAgentId] = useState("");
   const [metricsAgentQuery, setMetricsAgentQuery] = useState("");
   const [role, setRole] = useState<Role>(0);
@@ -77,9 +91,11 @@ export default function SettingsPage() {
   useEffect(() => {
     void loadProfile();
     void loadAgents();
+    void loadAgentAnalytics();
 
     const intervalId = window.setInterval(() => {
       void loadAgents(true);
+      void loadAgentAnalytics(true);
     }, 60_000);
 
     return () => {
@@ -151,11 +167,74 @@ export default function SettingsPage() {
     });
   }, [availableAgents, metricsAgentQuery]);
 
+  const analyticsByAgentId = useMemo(
+    () => new Map(agentAnalytics.map((item) => [item.agentId, item])),
+    [agentAnalytics],
+  );
+
   const selectedMetricsAgent = useMemo(
     () => availableAgents.find((agent) => agent.id === selectedMetricsAgentId) ?? null,
     [availableAgents, selectedMetricsAgentId],
   );
+  const selectedMetricsAgentAnalytics = useMemo(
+    () => analyticsByAgentId.get(selectedMetricsAgentId) ?? null,
+    [analyticsByAgentId, selectedMetricsAgentId],
+  );
   const selectedMetricsAgentStatus = selectedMetricsAgent ? getAgentStatus(selectedMetricsAgent.lastHeartbeatAt) : null;
+  const selectedMetricsAgentMeta = selectedMetricsAgent
+    ? [getDistributionLabel(selectedMetricsAgent.distribution, selectedMetricsAgent.os), selectedMetricsAgent.ipAddress || null].filter(Boolean).join(" · ")
+    : null;
+
+  const loadAgentAnalytics = async (background = false) => {
+    if (!background) {
+      setAgentAnalyticsLoading(true);
+    }
+
+    try {
+      const data = await apiJson<AgentAnalyticsDto[]>(
+        "/api/hackaton/analytics/agents",
+        { method: "GET" },
+        "Не удалось загрузить аналитику по агентам.",
+      );
+      setAgentAnalytics(data ?? []);
+      setAnalyticsError(null);
+    } catch (loadError) {
+      setAgentAnalytics([]);
+      setAnalyticsError(loadError instanceof Error ? loadError.message : "Не удалось загрузить аналитику по агентам.");
+    } finally {
+      if (!background) {
+        setAgentAnalyticsLoading(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedMetricsAgentId) {
+      setAgentMetrics(null);
+      return;
+    }
+
+    const loadMetrics = async () => {
+      setMetricsLoading(true);
+      setMetricsError(null);
+
+      try {
+        const data = await apiJson<AgentMetricsDto>(
+          `/api/hackaton/analytics/agents/${selectedMetricsAgentId}/metrics`,
+          { method: "GET" },
+          "Не удалось загрузить метрики агента.",
+        );
+        setAgentMetrics(data);
+      } catch (loadError) {
+        setAgentMetrics(null);
+        setMetricsError(loadError instanceof Error ? loadError.message : "Не удалось загрузить метрики агента.");
+      } finally {
+        setMetricsLoading(false);
+      }
+    };
+
+    void loadMetrics();
+  }, [selectedMetricsAgentId]);
 
   const handleProfileSave = async () => {
     setProfileError(null);
@@ -241,8 +320,13 @@ export default function SettingsPage() {
       }
 
       await apiJson<void>(
-        `/api/hackaton/password/reset?password=${encodeURIComponent(recoveryPassword)}`,
-        { method: "POST" },
+        "/api/hackaton/password/reset",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            newPassword: recoveryPassword,
+          }),
+        },
         "Не удалось задать новый пароль.",
       );
 
@@ -328,7 +412,7 @@ export default function SettingsPage() {
       <section>
         <SectionTitle
           title="Состояние удалённых машин"
-          subtitle="Новый backend отдаёт список агентов и heartbeat. Старые рейтинги и метрики для этой модели больше не показываются."
+          subtitle="Реальные метрики по агентам: запуски, среднее время выполнения и ошибки за день."
         />
 
         <div className="grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
@@ -350,6 +434,7 @@ export default function SettingsPage() {
                 const status = getAgentStatus(agent.lastHeartbeatAt);
                 const selected = agent.id === selectedMetricsAgentId;
                 const machineMeta = [getDistributionLabel(agent.distribution, agent.os), agent.ipAddress || null].filter(Boolean).join(" · ");
+                const machineAnalytics = analyticsByAgentId.get(agent.id);
 
                 return (
                   <button
@@ -366,6 +451,17 @@ export default function SettingsPage() {
                       <div className="min-w-0">
                         <div className="font-medium text-white">{agent.name}</div>
                         <div className="mt-1 text-sm text-white/50">{machineMeta || "Параметры машины появятся позже."}</div>
+                        <div className="mt-3 flex flex-wrap gap-2 text-xs text-white/40">
+                          <span className="rounded-full border border-white/8 bg-white/[0.03] px-2.5 py-1">
+                            {machineAnalytics?.total?.executions ?? 0} запусков
+                          </span>
+                          <span className="rounded-full border border-white/8 bg-white/[0.03] px-2.5 py-1">
+                            {formatPercent(machineAnalytics?.total?.successRate)}
+                          </span>
+                          <span className="rounded-full border border-white/8 bg-white/[0.03] px-2.5 py-1">
+                            сегодня {machineAnalytics?.today?.executions ?? 0}
+                          </span>
+                        </div>
                       </div>
                       <StatusBadge status={status} />
                     </div>
@@ -390,7 +486,7 @@ export default function SettingsPage() {
           <GlassCard className="p-5 sm:p-6">
             <SectionTitle
               title="Карточка агента"
-              subtitle="Здесь показывается только то, что реально отдаёт новый backend."
+              subtitle="Heartbeat, текущее состояние и агрегированные метрики выбранной машины."
             />
 
             {selectedMetricsAgent ? (
@@ -416,9 +512,42 @@ export default function SettingsPage() {
                   </div>
                 </div>
 
-                <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-4 text-sm leading-6 text-white/60">
-                  Старые блоки с рейтингом, скорингом и агрегированными метриками скрыты, потому что новый backend их больше не возвращает. Команды, выполнения и логи теперь живут на экранах агентов и групп.
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <div className="rounded-2xl border border-white/8 bg-white/5 p-4">
+                    <div className="text-sm text-white/50">Всего запусков</div>
+                    <div className="mt-2 text-lg font-medium text-white">
+                      {agentAnalyticsLoading && !selectedMetricsAgentAnalytics ? "..." : selectedMetricsAgentAnalytics?.total?.executions ?? 0}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-white/8 bg-white/5 p-4">
+                    <div className="text-sm text-white/50">Успешность</div>
+                    <div className="mt-2 text-lg font-medium text-white">
+                      {agentAnalyticsLoading && !selectedMetricsAgentAnalytics ? "..." : formatPercent(selectedMetricsAgentAnalytics?.total?.successRate)}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-white/8 bg-white/5 p-4">
+                    <div className="text-sm text-white/50">Запусков сегодня</div>
+                    <div className="mt-2 text-lg font-medium text-white">
+                      {agentAnalyticsLoading && !selectedMetricsAgentAnalytics ? "..." : selectedMetricsAgentAnalytics?.today?.executions ?? 0}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-white/8 bg-white/5 p-4">
+                    <div className="text-sm text-white/50">Ошибок сегодня</div>
+                    <div className="mt-2 text-lg font-medium text-white">
+                      {agentAnalyticsLoading && !selectedMetricsAgentAnalytics ? "..." : selectedMetricsAgentAnalytics?.today?.errors ?? 0}
+                    </div>
+                  </div>
                 </div>
+
+                <AgentMetricsDashboard
+                  metrics={agentMetrics}
+                  loading={metricsLoading}
+                  agentName={selectedMetricsAgent.name}
+                  agentMeta={selectedMetricsAgentMeta}
+                  title="Метрики выбранного агента"
+                  subtitle="Количество запусков, среднее время выполнения, ошибки за день и недельная динамика."
+                  emptyMessage="Для этой машины ещё нет данных по выполнению задач."
+                />
               </div>
             ) : (
               <div className="rounded-[1.55rem] border border-dashed border-white/10 px-4 py-12 text-center text-sm text-white/40">
@@ -428,9 +557,9 @@ export default function SettingsPage() {
           </GlassCard>
         </div>
 
-        {metricsError ? (
+        {(analyticsError || metricsError) ? (
           <div className="mt-4 rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-100/90">
-            {metricsError}
+            {[analyticsError, metricsError].filter(Boolean).join(" ")}
           </div>
         ) : null}
       </section>

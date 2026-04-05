@@ -1,6 +1,6 @@
 import Link from "next/link";
-import { Activity, Cpu, PlugZap } from "lucide-react";
-import type { AgentDto } from "@/lib/backend-types";
+import { Activity, Cpu, PlugZap, Trash2 } from "lucide-react";
+import type { AgentDto, AgentStatus } from "@/lib/backend-types";
 import { getAgentStatus, getDistributionLabel, getRelativeHeartbeatLabel } from "@/lib/backend-types";
 import { GlassCard, StatusBadge } from "@/components/ui";
 
@@ -13,8 +13,18 @@ function MetaRow({ icon, label, value }: { icon: React.ReactNode; label: string;
   );
 }
 
-export function AgentCard({ agent }: { agent: AgentDto }) {
-  const status = getAgentStatus(agent.lastHeartbeatAt);
+export function AgentCard({
+  agent,
+  status: providedStatus,
+  onDelete,
+  deleteLoading = false,
+}: {
+  agent: AgentDto;
+  status?: AgentStatus;
+  onDelete?: (agent: AgentDto) => void;
+  deleteLoading?: boolean;
+}) {
+  const status = providedStatus ?? getAgentStatus(agent.lastHeartbeatAt);
   const platformLabel = getDistributionLabel(agent.distribution, agent.os);
   const machineDetails = [platformLabel, agent.ipAddress || null].filter(Boolean).join(" · ");
 
@@ -33,9 +43,22 @@ export function AgentCard({ agent }: { agent: AgentDto }) {
             </span>
           </div>
         </div>
-        <Link href={`/dashboard/agents/${agent.id}`} className="inline-flex w-full items-center justify-center rounded-xl border border-accent/20 px-3 py-2 text-sm text-accent transition hover:bg-accent/10 sm:w-auto">
-          Open
-        </Link>
+        <div className="flex w-full gap-2 sm:w-auto">
+          <Link href={`/dashboard/agents/${agent.id}`} className="inline-flex flex-1 items-center justify-center rounded-xl border border-accent/20 px-3 py-2 text-sm text-accent transition hover:bg-accent/10 sm:flex-none">
+            Open
+          </Link>
+          {onDelete ? (
+            <button
+              type="button"
+              onClick={() => onDelete(agent)}
+              disabled={deleteLoading}
+              aria-label={`Удалить агента ${agent.name}`}
+              className="inline-flex items-center justify-center rounded-xl border border-rose-400/20 bg-rose-400/10 px-3 py-2 text-rose-200 transition hover:bg-rose-400/15 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {deleteLoading ? "..." : <Trash2 size={15} />}
+            </button>
+          ) : null}
+        </div>
       </div>
 
       <div className="mt-5 space-y-3">

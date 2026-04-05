@@ -3,6 +3,7 @@
 import { getReadableApiError } from "@/lib/api-error";
 
 let refreshPromise: Promise<boolean> | null = null;
+let authRedirectScheduled = false;
 
 function buildInit(init?: RequestInit): RequestInit {
   return {
@@ -29,6 +30,20 @@ async function refreshSession() {
   return refreshPromise;
 }
 
+function redirectToLogin() {
+  if (typeof window === "undefined" || authRedirectScheduled) {
+    return;
+  }
+
+  const { pathname } = window.location;
+  if (pathname === "/login" || pathname === "/register" || pathname === "/confirm-email") {
+    return;
+  }
+
+  authRedirectScheduled = true;
+  window.location.assign("/login");
+}
+
 export async function apiFetch(path: string, init?: RequestInit, retryOnUnauthorized = true) {
   const response = await fetch(path, buildInit(init));
 
@@ -44,6 +59,8 @@ export async function apiFetch(path: string, init?: RequestInit, retryOnUnauthor
     if (refreshed) {
       return fetch(path, buildInit(init));
     }
+
+    redirectToLogin();
   }
 
   return response;

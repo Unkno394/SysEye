@@ -3,13 +3,16 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import shutil
+import signal
 import subprocess
 import sys
+import time
 from urllib.parse import parse_qs, urlparse
 
 from syseye_agent import __version__
 from syseye_agent.agent import Agent
-from syseye_agent.config import AgentConfig, DEFAULT_LOG_FILE, ensure_app_dir
+from syseye_agent.config import AgentConfig, DEFAULT_INSTANCE_LOCK_FILE, DEFAULT_LOG_FILE, ensure_app_dir
 from syseye_agent.service import build_linux_systemd_unit, build_windows_task_script
 
 
@@ -124,6 +127,162 @@ def _activate_background_logging(raw_path: str | None) -> None:
     print(f"[child] background logging enabled: {log_path}", flush=True)
 
 
+def _read_instance_pid(lock_path: Path) -> int | None:
+    if not lock_path.exists():
+        return None
+
+    try:
+        raw_value = lock_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+    if not raw_value:
+        return None
+
+    try:
+        return int(raw_value)
+    except ValueError:
+        return None
+
+
+def _is_running_pid(pid: int) -> bool:
+    if pid <= 0:
+        return False
+
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _wait_for_process_exit(pid: int, timeout_seconds: float) -> bool:
+    deadline = time.time() + timeout_seconds
+
+    while time.time() < deadline:
+        if not _is_running_pid(pid):
+            return True
+        time.sleep(0.1)
+
+    return not _is_running_pid(pid)
+
+
+def _is_agent_process(pid: int) -> bool:
+    if os.name == "nt":
+        return True
+
+    try:
+        command_line = Path(f"/proc/{pid}/cmdline").read_text(encoding="utf-8", errors="ignore").replace("\0", " ")
+    except OSError:
+        return False
+
+    normalized = command_line.lower()
+    return "syseye_agent" in normalized or "syseye-agent" in normalized
+
+
+def _terminate_existing_instance(lock_path: Path, log_handle) -> None:
+    pid = _read_instance_pid(lock_path)
+    if pid is None:
+        return
+
+    if not _is_running_pid(pid):
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+
+    if not _is_agent_process(pid):
+        log_handle.write(f"[launcher] lock file points to unrelated pid={pid}, leaving it untouched\n")
+        log_handle.flush()
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+
+    log_handle.write(f"[launcher] stopping existing agent instance pid={pid}\n")
+    log_handle.flush()
+
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _wait_for_process_exit(pid, 5)
+        return
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+
+    if _wait_for_process_exit(pid, 5):
+        return
+
+    log_handle.write(f"[launcher] forcing agent instance pid={pid} to stop\n")
+    log_handle.flush()
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+
+    _wait_for_process_exit(pid, 2)
+
+
+def _try_update_linux_service(args: argparse.Namespace, log_handle) -> bool:
+    if os.name == "nt":
+        return False
+
+    systemctl_path = shutil.which("systemctl")
+    if not systemctl_path:
+        return False
+
+    unit_dir = Path.home() / ".config/systemd/user"
+    unit_path = unit_dir / "syseye-agent.service"
+    unit_content = build_linux_systemd_unit(args.server, args.token)
+
+    try:
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        unit_path.write_text(unit_content, encoding="utf-8")
+
+        commands = [
+            [systemctl_path, "--user", "daemon-reload"],
+            [systemctl_path, "--user", "enable", "--now", "syseye-agent.service"],
+            [systemctl_path, "--user", "restart", "syseye-agent.service"],
+        ]
+
+        for command in commands:
+            completed = subprocess.run(
+                command,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+
+            if completed.returncode != 0:
+                output = completed.stdout.strip()
+                log_handle.write(
+                    f"[launcher] systemd command failed: {' '.join(command)} :: {output}\n")
+                log_handle.flush()
+                return False
+
+        log_handle.write(f"[launcher] updated user service {unit_path}\n")
+        log_handle.flush()
+        print(f"[OK] agent service updated: {unit_path}")
+        return True
+    except Exception as exc:
+        log_handle.write(f"[launcher] systemd update failed: {exc}\n")
+        log_handle.flush()
+        return False
+
+
 def _extract_single_query_value(values: dict[str, list[str]], name: str) -> str | None:
     items = values.get(name) or []
     for item in items:
@@ -177,12 +336,19 @@ def _build_args_from_custom_url(raw_url: str, log_file: str | None = None, state
 def _launch_background(args: argparse.Namespace) -> int:
     log_path = _resolve_log_path(args.log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = DEFAULT_INSTANCE_LOCK_FILE
 
-    command = _build_background_command(args)
     with log_path.open("a", encoding="utf-8") as log_handle:
         log_handle.write("[launcher] starting detached SysEye agent\n")
         log_handle.flush()
 
+        if _try_update_linux_service(args, log_handle):
+            return 0
+
+        _terminate_existing_instance(lock_path, log_handle)
+        log_handle.flush()
+
+    command = _build_background_command(args)
     popen_kwargs: dict[str, object] = {
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,

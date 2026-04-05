@@ -33,7 +33,7 @@ public class CommandController(ICommandService commandService) : ControllerBase
     /// <summary>
     /// Обновляет существующую команду.
     /// </summary>
-    [HttpPatch("{id}")]
+    [HttpPatch("{id:guid}")]
     public async Task<IActionResult> UpdateCommand(Guid id, [FromBody] UpdateCommandRequest request, CancellationToken ct)
     {
         await commandService.UpdateAsync(
@@ -52,7 +52,7 @@ public class CommandController(ICommandService commandService) : ControllerBase
     /// <summary>
     /// Удаляет команду. Системные команды нельзя удалить.
     /// </summary>
-    [HttpDelete("{id}")]
+    [HttpDelete("{id:guid}")]
     public async Task<IActionResult> DeleteCommand(Guid id, CancellationToken ct)
     {
         await commandService.DeleteAsync(id, User.GetUserId(), ct);
@@ -64,7 +64,7 @@ public class CommandController(ICommandService commandService) : ControllerBase
     /// Добавляет плейсхолдер к команде.
     /// </summary>
     /// <param name="commandId">ID команды</param>
-    [HttpPost("{commandId}/placeholders")]
+    [HttpPost("{commandId:guid}/placeholders")]
     [Produces(typeof(Guid))]
     public async Task<ActionResult<Guid>> AddPlaceholder(Guid commandId, [FromBody] AddPlaceholderRequest request, CancellationToken ct)
     {
@@ -93,7 +93,7 @@ public class CommandController(ICommandService commandService) : ControllerBase
     /// Получает список плейсхолдеров команды.
     /// </summary>
     /// <param name="commandId">ID команды</param>
-    [HttpGet("{commandId}/placeholders")]
+    [HttpGet("{commandId:guid}/placeholders")]
     public async Task<ActionResult<IEnumerable<object>>> GetCommandPlaceholders(Guid commandId, CancellationToken ct)
     {
         var placeholders = await commandService.GetCommandPlaceholdersAsync(commandId, User.GetUserId(), ct);
@@ -106,7 +106,7 @@ public class CommandController(ICommandService commandService) : ControllerBase
     /// </summary>
     /// <param name="commandId">ID команды</param>
     /// <param name="index">Индекс плейсхолдера </param>
-    [HttpPatch("{commandId}/placeholders/{index}")]
+    [HttpPatch("{commandId:guid}/placeholders/{index}")]
     public async Task<IActionResult> UpdatePlaceholder(
         Guid commandId,
         int index,
@@ -128,7 +128,7 @@ public class CommandController(ICommandService commandService) : ControllerBase
     /// </summary>
     /// <param name="commandId">ID команды</param>
     /// <param name="index">Индекс плейсхолдера (например, 1 для $1)</param>
-    [HttpDelete("{commandId}/placeholders/{index}")]
+    [HttpDelete("{commandId:guid}/placeholders/{index}")]
     public async Task<IActionResult> DeletePlaceholder(Guid commandId, int index, CancellationToken ct)
     {
         await commandService.DeletePlaceholderAsync(

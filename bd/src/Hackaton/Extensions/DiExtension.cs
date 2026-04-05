@@ -46,6 +46,8 @@ public static class DiExtension
         services.AddScoped<IAgentCommandDispatcher, AgentCommandDispatcher>();
 
         services.AddScoped<IAgentService, AgentService>();
+        services.AddScoped<IAgentLogsService, AgentLogsService>();
+        services.AddScoped<IAnalyticsService, AnalyticsService>();
         services.AddScoped<IScenarioService, ScenarioService>();
         services.AddScoped<ICommandService, CommandService>();
         services.AddScoped<ITaskService, TaskService>();

@@ -43,26 +43,13 @@ public class AgentController(IAgentService agentService, IApiKeyService apiKeySe
             request.Os,
             ct);
 
-        var apiKey = await apiKeyService.Generate(agent.Id, 30, ct);
-        var payload = JsonSerializer.SerializeToUtf8Bytes(new
-        {
-            agentId = agent.Id,
-            apiKey = apiKey.Value,
-            name = agent.Name
-        });
-
-        return Ok(new AgentConnectionTokenDto
-        {
-            AgentId = agent.Id,
-            Name = agent.Name,
-            Token = Convert.ToBase64String(payload),
-        });
+        return Ok(await IssueConnectionToken(agent.Id, agent.Name, ct));
     }
 
     /// <summary>
     /// Получает информацию об агенте.
     /// </summary>
-    [HttpGet("{id}")]
+    [HttpGet("{id:guid}")]
     [Produces(typeof(AgentDto))]
     public async Task<ActionResult<AgentDto?>> GetAgent(Guid id, CancellationToken ct)
     {
@@ -71,6 +58,18 @@ public class AgentController(IAgentService agentService, IApiKeyService apiKeySe
         if (agent == null) return NotFound();
 
         return Ok(agent);
+    }
+
+    /// <summary>
+    /// Возвращает новый токен подключения для существующего агента.
+    /// </summary>
+    [HttpGet("{id:guid}/connection-token")]
+    [Produces(typeof(AgentConnectionTokenDto))]
+    public async Task<ActionResult<AgentConnectionTokenDto>> GetConnectionToken(Guid id, CancellationToken ct)
+    {
+        var agent = await agentService.Get(id, User.GetUserId(), ct);
+
+        return Ok(await IssueConnectionToken(agent.Id, agent.Name, ct));
     }
 
     /// <summary>
@@ -88,7 +87,7 @@ public class AgentController(IAgentService agentService, IApiKeyService apiKeySe
     /// <summary>
     /// Обновляет информацию об агенте.
     /// </summary>
-    [HttpPatch("{id}")]
+    [HttpPatch("{id:guid}")]
     public async Task<IActionResult> UpdateAgent(Guid id, [FromBody] UpdateAgentRequest request, CancellationToken ct)
     {
         await agentService.Update(
@@ -102,7 +101,7 @@ public class AgentController(IAgentService agentService, IApiKeyService apiKeySe
     }
 
 
-    [HttpDelete("{id}")]
+    [HttpDelete("{id:guid}")]
     public async Task<IActionResult> DeleteAgent(Guid id, CancellationToken ct)
     {
         await agentService.DeleteAsync(id, User.GetUserId(), ct);
@@ -111,12 +110,30 @@ public class AgentController(IAgentService agentService, IApiKeyService apiKeySe
     }
 
 
-    [HttpPost("{id}/heartbeat")]
+    [HttpPost("{id:guid}/heartbeat")]
     [ProducesResponseType(typeof(DateTime), StatusCodes.Status200OK)]
     public async Task<ActionResult<DateTime>> Heartbeat(Guid id, CancellationToken ct)
     {
         var timestamp = await agentService.HeartbeatAsync(id, User.GetUserId(), ct);
 
         return Ok(timestamp);
+    }
+
+    private async Task<AgentConnectionTokenDto> IssueConnectionToken(Guid agentId, string agentName, CancellationToken ct)
+    {
+        var apiKey = await apiKeyService.Generate(agentId, 30, ct);
+        var payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            agentId,
+            apiKey = apiKey.Value,
+            name = agentName
+        });
+
+        return new AgentConnectionTokenDto
+        {
+            AgentId = agentId,
+            Name = agentName,
+            Token = Convert.ToBase64String(payload),
+        };
     }
 }

@@ -103,6 +103,26 @@ export function removeAgentGroup(id: string) {
   writeGroups(readGroups().filter((group) => group.id !== id));
 }
 
+export function removeAgentFromGroups(agentId: string) {
+  const normalizedAgentId = agentId.trim();
+  if (!normalizedAgentId) {
+    return;
+  }
+
+  const current = readGroups();
+  const next = current.map((group) => ({
+    ...group,
+    agentIds: group.agentIds.filter((currentAgentId) => currentAgentId !== normalizedAgentId),
+  }));
+
+  const hasChanges = next.some((group, index) => group.agentIds.length !== current[index]?.agentIds.length);
+  if (!hasChanges) {
+    return;
+  }
+
+  writeGroups(next);
+}
+
 export function subscribeToAgentGroups(listener: () => void) {
   if (typeof window === "undefined") {
     return () => undefined;

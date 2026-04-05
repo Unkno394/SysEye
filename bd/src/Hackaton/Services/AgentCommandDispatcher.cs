@@ -24,4 +24,21 @@ public class AgentCommandDispatcher(
         await hubContext.Clients.Group(groupName)
             .SendAsync("Command", command, cancellationToken);
     }
+
+    public async Task CancelTaskAsync(
+        Guid agentId,
+        Guid taskId,
+        CancellationToken cancellationToken = default)
+    {
+        var groupName = $"agent-{agentId}";
+
+        logger.LogInformation(
+            "Отправка отмены задачи AgentId: {AgentId}, TaskId: {TaskId}, Группа: {GroupName}",
+            agentId,
+            taskId,
+            groupName);
+
+        await hubContext.Clients.Group(groupName)
+            .SendAsync("CancelTask", taskId.ToString(), cancellationToken);
+    }
 }

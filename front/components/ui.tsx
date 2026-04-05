@@ -42,19 +42,19 @@ export function StatusBadge({ status }: { status: "online" | "offline" | "busy" 
   } as const;
 
   const labels = {
-    online: "online",
-    offline: "offline",
-    busy: "busy",
-    queued: "queued",
-    success: "success",
-    error: "error",
-    running: "running",
-    cancelled: "cancelled",
-    interrupted: "interrupted",
-    sent: "sent",
+    online: "онлайн",
+    offline: "оффлайн",
+    busy: "занят",
+    queued: "в очереди",
+    success: "успешно",
+    error: "ошибка",
+    running: "выполняется",
+    cancelled: "отменена",
+    interrupted: "прервана",
+    sent: "отправлена",
   } as const;
 
-  return <span className={cn("inline-flex rounded-full border px-2.5 py-1 text-xs font-medium capitalize", styles[status])}>{labels[status]}</span>;
+  return <span className={cn("inline-flex rounded-full border px-2.5 py-1 text-xs font-medium", styles[status])}>{labels[status]}</span>;
 }
 
 export function PrimaryButton({

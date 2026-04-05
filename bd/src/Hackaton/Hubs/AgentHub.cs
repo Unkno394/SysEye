@@ -150,7 +150,17 @@ public class AgentHub(
         if (string.IsNullOrWhiteSpace(agentId))
             return;
 
-        await agentOtlpSender.SendAsync(agentId, agentLogDto);
+        try
+        {
+            await agentOtlpSender.SendAsync(agentId, agentLogDto);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex,
+                "Не удалось отправить лог агента {AgentId} в Loki. Продолжаю без внешнего лог-стрима.",
+                agentId);
+        }
 
         if (agentLogDto.ExecutionId.HasValue)
         {
@@ -212,79 +222,37 @@ public class AgentHub(
         if (string.IsNullOrWhiteSpace(chunk))
             return;
 
-        await SendExecutionLogAsync(
-            taskId,
+        var userId = await GetCurrentUserIdAsync();
+        if (userId == Guid.Empty || !Guid.TryParse(taskId, out var executionId))
+            return;
+
+        await taskService.AppendOutputAsync(
+            executionId,
+            userId,
             chunk,
-            "Information",
-            "stdout");
+            Context.ConnectionAborted);
     }
 
     public async Task CompleteTask(string taskId, string status, string stdout, string stderr, int? exitCode)
     {
-        var agentId = GetCurrentAgentId();
-        if (Guid.TryParse(agentId, out var parsedAgentId))
-        {
-            var userId = await dbContext.Agents.AsNoTracking()
-                .Where(x => x.Id == parsedAgentId && !x.IsDeleted)
-                .Select(x => x.UserId)
-                .FirstOrDefaultAsync(Context.ConnectionAborted);
+        var userId = await GetCurrentUserIdAsync();
+        if (userId == Guid.Empty || !Guid.TryParse(taskId, out var executionId))
+            return;
 
-            if (userId != Guid.Empty && Guid.TryParse(taskId, out var executionId))
-            {
-                await taskService.CompleteTaskAsync(
-                    executionId,
-                    userId,
-                    status,
-                    stdout,
-                    stderr,
-                    exitCode,
-                    Context.ConnectionAborted);
-            }
-        }
-
-        if (!string.IsNullOrWhiteSpace(stdout))
-        {
-            await SendExecutionLogAsync(taskId, stdout, "Information", "stdout");
-        }
-
-        if (!string.IsNullOrWhiteSpace(stderr))
-        {
-            await SendExecutionLogAsync(taskId, stderr, "Error", "stderr");
-        }
-
-        var summary = $"status={status}; exitCode={(exitCode.HasValue ? exitCode.Value : -1)}";
-        await SendExecutionLogAsync(taskId, summary, "Information", "completion");
+        await taskService.CompleteTaskAsync(
+            executionId,
+            userId,
+            status,
+            stdout,
+            stderr,
+            exitCode,
+            Context.ConnectionAborted);
     }
 
     private async Task RejectConnection(string message)
     {
         await Clients.Caller.SendAsync("Error", message);
         Context.Abort();
-    }
-
-    private async Task SendExecutionLogAsync(
-        string taskId,
-        string message,
-        string level,
-        string category)
-    {
-        var agentId = GetCurrentAgentId();
-        if (string.IsNullOrWhiteSpace(agentId) || !Guid.TryParse(taskId, out var executionId))
-            return;
-
-        var log = new AgentLogDto
-        {
-            ExecutionId = executionId,
-            Message = message,
-            Level = level,
-            Timestamp = DateTimeOffset.UtcNow,
-            Category = category,
-        };
-
-        await agentOtlpSender.SendAsync(agentId, log, Context.ConnectionAborted);
-        await clientHubContext.Clients
-            .Group(ClientHub.GetExecutionGroup(executionId))
-            .SendAsync("ExecutionLogReceived", log, Context.ConnectionAborted);
     }
 
     private static bool TryGetRequiredValue(
@@ -349,6 +317,18 @@ public class AgentHub(
         return Context.Items.TryGetValue(AgentIdItemKey, out var value)
             ? value as string
             : null;
+    }
+
+    private async Task<Guid> GetCurrentUserIdAsync()
+    {
+        var agentId = GetCurrentAgentId();
+        if (!Guid.TryParse(agentId, out var parsedAgentId))
+            return Guid.Empty;
+
+        return await dbContext.Agents.AsNoTracking()
+            .Where(x => x.Id == parsedAgentId && !x.IsDeleted)
+            .Select(x => x.UserId)
+            .FirstOrDefaultAsync(Context.ConnectionAborted);
     }
 
     private static string GetAgentGroupName(string agentId) => $"agent-{agentId}";

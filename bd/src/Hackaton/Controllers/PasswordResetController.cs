@@ -33,7 +33,10 @@ public class PasswordResetController(
     /// Смена пароля по почте
     /// </summary>
     [HttpPost("[action]")]
-    public async Task<IActionResult> Reset([FromQuery] string password, CancellationToken ct)
+    public async Task<IActionResult> Reset(
+        [FromBody] ResetPasswordByTokenRequest? request,
+        [FromQuery] string? password,
+        CancellationToken ct)
     {
         var refreshToken = Request.Cookies[options.Value.ResetPasswordCookieName];
 
@@ -44,7 +47,15 @@ public class PasswordResetController(
 
         var email = principal.GetEmail();
         if (string.IsNullOrEmpty(email)) return BadRequest("Токен не корректен: отсутвует email");
-        await resetPasswordService.ResetPassword(email, password, ct);
+
+        var newPassword = request?.NewPassword;
+        if (string.IsNullOrWhiteSpace(newPassword))
+            newPassword = password;
+
+        if (string.IsNullOrWhiteSpace(newPassword))
+            return BadRequest("Новый пароль обязателен");
+
+        await resetPasswordService.ResetPassword(email, newPassword, ct);
 
         return Ok();
     }

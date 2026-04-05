@@ -46,6 +46,7 @@ public class LogsController(
         CancellationToken cancellationToken = default)
     {
         var logs = await agentLogsService.GetByExecutionAsync(
+            User.GetUserId(),
             executionId,
             limit,
             cancellationToken);

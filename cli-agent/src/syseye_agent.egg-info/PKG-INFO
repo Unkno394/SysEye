@@ -46,6 +46,8 @@ Install from PyPI from any directory:
 pipx install syseye-agent
 ```
 
+On Windows, if this is your first `pipx` app, run `py -m pipx ensurepath` and reopen PowerShell before calling `syseye-agent`.
+
 If `pipx` is not installed yet:
 
 ```bash
@@ -75,6 +77,39 @@ Run from any console:
 syseye-agent connect --server http://localhost:5000 --token YOUR_CONNECTION_TOKEN
 ```
 
+Run directly from the repository checkout:
+
+```bash
+python cli-agent/main.py connect --server http://localhost:5000 --token YOUR_CONNECTION_TOKEN
+```
+
+Run in the background and keep the agent alive after closing the terminal:
+
+```bash
+syseye-agent connect --server http://localhost:5000 --token YOUR_CONNECTION_TOKEN --background
+```
+
+The same works from the repository checkout:
+
+```bash
+python cli-agent/main.py connect --server http://localhost:5000 --token YOUR_CONNECTION_TOKEN --background
+```
+
+On Windows, a detached hidden process is the most compatible option. This does not depend on `--background` support in the installed CLI:
+
+```powershell
+$agentPath = (Get-Command syseye-agent).Source
+$launchUrl = "syseye-agent://connect?server=$([Uri]::EscapeDataString('http://localhost:5000'))&token=$([Uri]::EscapeDataString('YOUR_CONNECTION_TOKEN'))"
+$logFile = Join-Path $HOME ".syseye-agent\agent.log"
+Start-Process -WindowStyle Hidden -FilePath $agentPath -ArgumentList @('open-url', $launchUrl, '--log-file', $logFile)
+```
+
+Default background log file:
+
+```text
+~/.syseye-agent/agent.log
+```
+
 The connection token is issued in the site UI first. The agent card appears after the first successful connect.
 
 Parallel execution can be limited explicitly:
@@ -98,10 +133,46 @@ systemctl --user daemon-reload
 systemctl --user enable --now syseye-agent.service
 ```
 
-Windows autostart via Task Scheduler:
+Windows hidden background start:
+
+Save this as `install-syseye-agent.ps1`:
 
 ```powershell
-syseye-agent service windows --server http://localhost:5000 --token YOUR_CONNECTION_TOKEN > install-syseye-agent.ps1
+$ErrorActionPreference = "Stop"
+$startupDir = [Environment]::GetFolderPath("Startup")
+$launcherDir = Join-Path $env:USERPROFILE ".syseye-agent"
+$agentPath = Join-Path $env:USERPROFILE ".local\bin\syseye-agent.exe"
+
+New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null
+
+if (-not (Test-Path $agentPath)) {
+    $command = Get-Command syseye-agent -ErrorAction SilentlyContinue
+    if ($command) {
+        $agentPath = $command.Source
+    } else {
+        throw "syseye-agent not found. Run pipx ensurepath, reopen PowerShell, or use the executable from $HOME\.local\bin."
+    }
+}
+
+$server = "http://localhost:5000"
+$token = "YOUR_CONNECTION_TOKEN"
+$launchUrl = "syseye-agent://connect?server=$([Uri]::EscapeDataString($server))&token=$([Uri]::EscapeDataString($token))"
+$logFile = Join-Path $launcherDir "agent.log"
+$startupScriptPath = Join-Path $startupDir "SysEye Agent.vbs"
+$runCommand = '"' + $agentPath + '" open-url "' + $launchUrl + '" --log-file "' + $logFile + '"'
+$vbsContent = @"
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run ""$runCommand"", 0, False
+"@
+
+Set-Content -Path $startupScriptPath -Value $vbsContent -Encoding ASCII
+Start-Process -WindowStyle Hidden -FilePath $agentPath -ArgumentList @('open-url', $launchUrl, '--log-file', $logFile)
+Write-Host "SysEye Agent autostart installed to Startup folder and started."
+```
+
+Run it:
+
+```powershell
 powershell -ExecutionPolicy Bypass -File .\install-syseye-agent.ps1
 ```
 

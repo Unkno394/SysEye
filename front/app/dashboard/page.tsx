@@ -1,14 +1,17 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Layers3, Plus, Trash2 } from "lucide-react";
+import { Check, Copy, Layers3, Plus, Trash2 } from "lucide-react";
 import { AgentCard } from "@/components/agent-card";
+import { AgentRatingBoard } from "@/components/agent-rating-board";
 import { GlassCard, PrimaryButton, SectionTitle } from "@/components/ui";
 import { apiJson } from "@/lib/api-client";
-import { getAgentGroups, removeAgentGroup, subscribeToAgentGroups, upsertAgentGroup, type AgentGroup } from "@/lib/agent-groups";
+import { getAgentGroups, removeAgentFromGroups, removeAgentGroup, subscribeToAgentGroups, upsertAgentGroup, type AgentGroup } from "@/lib/agent-groups";
 import {
+  type AgentLaunchPlatform,
+  buildAgentReconnectUrl,
   buildLinuxServiceGenerateCommand,
   buildWindowsInstallScriptContent,
   getCliInstallCommand,
@@ -17,11 +20,13 @@ import {
   getWindowsPathRefreshNote,
   getWindowsPipxInstallCommand,
   getWindowsServiceEnableCommand,
+  inferLocalAgentPlatform,
   inferAgentServerUrl,
 } from "@/lib/agent-launch";
-import type { AgentConnectionTokenDto, AgentDto, PagedResult } from "@/lib/backend-types";
-import { getAgentStatus, getDistributionLabel } from "@/lib/backend-types";
+import type { AgentConnectionTokenDto, AgentDto, AgentRatingDto, PagedResult } from "@/lib/backend-types";
+import { getDistributionLabel } from "@/lib/backend-types";
 import { useClientRealtime } from "@/lib/client-realtime";
+import { applyEffectiveAgentMetadata, clearAgentLaunch, getEffectiveAgentStatus, markAgentLaunched, useLocalAgentHeartbeats, useLocalAgentLaunches } from "@/lib/local-agent-runtime";
 
 const CLI_PYPI_INSTALL = getCliInstallCommand();
 const DEFAULT_AGENT_SERVER_URL = getDefaultAgentServerUrl();
@@ -36,6 +41,9 @@ export default function DashboardPage() {
   const [groups, setGroups] = useState<AgentGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [ratingsLoading, setRatingsLoading] = useState(false);
+  const [ratingsError, setRatingsError] = useState<string | null>(null);
+  const [agentRatings, setAgentRatings] = useState<AgentRatingDto[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
   const [groupOpen, setGroupOpen] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -47,11 +55,37 @@ export default function DashboardPage() {
   const [createError, setCreateError] = useState<string | null>(null);
   const [groupError, setGroupError] = useState<string | null>(null);
   const [createdConnection, setCreatedConnection] = useState<AgentConnectionTokenDto | null>(null);
-  const [instructionPlatform, setInstructionPlatform] = useState<"linux" | "windows">("linux");
+  const [instructionPlatform, setInstructionPlatform] = useState<AgentLaunchPlatform>(inferLocalAgentPlatform);
   const [agentServerUrl, setAgentServerUrl] = useState(DEFAULT_AGENT_SERVER_URL);
+  const [deletingAgentId, setDeletingAgentId] = useState<string | null>(null);
+  const [copiedInstructionId, setCopiedInstructionId] = useState<string | null>(null);
+  const localLaunches = useLocalAgentLaunches();
 
   const loadGroups = () => {
     setGroups(getAgentGroups());
+  };
+
+  const loadAgentRatings = async (background = false) => {
+    if (!background) {
+      setRatingsLoading(true);
+    }
+
+    try {
+      const data = await apiJson<AgentRatingDto[]>(
+        "/api/hackaton/analytics/agents/ratings",
+        { method: "GET" },
+        "Не удалось загрузить рейтинг агентов.",
+      );
+      setAgentRatings(data ?? []);
+      setRatingsError(null);
+    } catch (loadError) {
+      setAgentRatings([]);
+      setRatingsError(loadError instanceof Error ? loadError.message : "Не удалось загрузить рейтинг агентов.");
+    } finally {
+      if (!background) {
+        setRatingsLoading(false);
+      }
+    }
   };
 
   const loadAgents = async (background = false) => {
@@ -75,8 +109,10 @@ export default function DashboardPage() {
 
   useEffect(() => {
     void loadAgents();
+    void loadAgentRatings();
     const intervalId = window.setInterval(() => {
       void loadAgents(true);
+      void loadAgentRatings(true);
     }, 60_000);
     const stopGroupsSubscription = subscribeToAgentGroups(() => {
       loadGroups();
@@ -110,34 +146,46 @@ export default function DashboardPage() {
       });
     },
     onAgentDeleted: ({ agentId: deletedAgentId }) => {
+      removeAgentFromGroups(deletedAgentId);
       setAgents((current) => current.filter((agent) => agent.id !== deletedAgentId));
     },
   });
 
+  useLocalAgentHeartbeats(
+    agents
+      .filter((agent) => localLaunches[agent.id])
+      .map((agent) => agent.id),
+  );
+
+  const effectiveAgents = useMemo(
+    () => agents.map((agent) => applyEffectiveAgentMetadata(agent, localLaunches)),
+    [agents, localLaunches],
+  );
+
   const summary = useMemo(() => {
-    const online = agents.filter((agent) => getAgentStatus(agent.lastHeartbeatAt) === "online").length;
-    const offline = agents.filter((agent) => getAgentStatus(agent.lastHeartbeatAt) === "offline").length;
+    const online = effectiveAgents.filter((agent) => getEffectiveAgentStatus(agent, localLaunches) === "online").length;
+    const offline = effectiveAgents.filter((agent) => getEffectiveAgentStatus(agent, localLaunches) === "offline").length;
     return {
       online,
       busy: 0,
       offline,
     };
-  }, [agents]);
+  }, [effectiveAgents, localLaunches]);
 
   const selectedGroupAgentIdSet = useMemo(() => new Set(selectedGroupAgentIds), [selectedGroupAgentIds]);
 
   const filteredGroupAgents = useMemo(() => {
     const normalizedQuery = groupAgentQuery.trim().toLowerCase();
-    if (!normalizedQuery) return agents;
+    if (!normalizedQuery) return effectiveAgents;
 
-    return agents.filter((agent) => {
+    return effectiveAgents.filter((agent) => {
       const searchText = [agent.name, getDistributionLabel(agent.distribution, agent.os), agent.ipAddress ?? ""]
         .join(" ")
         .toLowerCase();
 
       return searchText.includes(normalizedQuery);
     });
-  }, [agents, groupAgentQuery]);
+  }, [effectiveAgents, groupAgentQuery]);
 
   const handleCreateAgent = async () => {
     setCreating(true);
@@ -156,6 +204,15 @@ export default function DashboardPage() {
       );
 
       setCreatedConnection(connection);
+      markAgentLaunched(connection.agentId, inferLocalAgentPlatform());
+      const reconnectUrl = buildAgentReconnectUrl(agentServerUrl, connection.token);
+      window.location.assign(reconnectUrl);
+      window.setTimeout(() => {
+        void loadAgents(true);
+      }, 4_000);
+      window.setTimeout(() => {
+        void loadAgents(true);
+      }, 9_000);
       await loadAgents(true);
     } catch (createError) {
       setCreateError(createError instanceof Error ? createError.message : "Не удалось выпустить токен подключения.");
@@ -170,7 +227,20 @@ export default function DashboardPage() {
     setNewAgentName("");
     setCreateError(null);
     setCreatedConnection(null);
-    setInstructionPlatform("linux");
+    setInstructionPlatform(inferLocalAgentPlatform());
+    setCopiedInstructionId(null);
+  };
+
+  const handleCopyInstruction = async (id: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedInstructionId(id);
+      window.setTimeout(() => {
+        setCopiedInstructionId((current) => (current === id ? null : current));
+      }, 3000);
+    } catch {
+      setCreateError("Не удалось скопировать текст в буфер обмена.");
+    }
   };
 
   const handleOpenGroupModal = () => {
@@ -221,6 +291,26 @@ export default function DashboardPage() {
     removeAgentGroup(groupId);
   };
 
+  const handleDeleteAgent = async (agent: AgentDto) => {
+    if (!window.confirm(`Удалить агента "${agent.name}"?`)) {
+      return;
+    }
+
+    setDeletingAgentId(agent.id);
+    setError(null);
+
+    try {
+      await apiJson<void>(`/api/hackaton/agent/${agent.id}`, { method: "DELETE" }, "Не удалось удалить агента.");
+      clearAgentLaunch(agent.id);
+      removeAgentFromGroups(agent.id);
+      setAgents((current) => current.filter((item) => item.id !== agent.id));
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Не удалось удалить агента.");
+    } finally {
+      setDeletingAgentId(null);
+    }
+  };
+
   return (
     <div className="space-y-6 pb-10">
       <GlassCard className="p-6 sm:p-8">
@@ -254,6 +344,15 @@ export default function DashboardPage() {
         </div>
       </GlassCard>
 
+      <div>
+        <AgentRatingBoard ratings={agentRatings} loading={ratingsLoading} />
+        {ratingsError ? (
+          <div className="mt-4 rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-100/90">
+            {ratingsError}
+          </div>
+        ) : null}
+      </div>
+
       <div className="grid gap-4 sm:grid-cols-3">
         <GlassCard className="p-5">
           <div className="text-sm text-white/55">Online</div>
@@ -280,8 +379,9 @@ export default function DashboardPage() {
             {groups.map((group) => {
               const groupAgents = group.agentIds
                 .map((agentId) => agents.find((agent) => agent.id === agentId))
+                .map((agent) => (agent ? applyEffectiveAgentMetadata(agent, localLaunches) : null))
                 .filter((agent): agent is AgentDto => Boolean(agent));
-              const groupOnline = groupAgents.filter((agent) => getAgentStatus(agent.lastHeartbeatAt) === "online").length;
+              const groupOnline = groupAgents.filter((agent) => getEffectiveAgentStatus(agent, localLaunches) === "online").length;
               const preview = groupAgents.slice(0, 3).map((agent) => agent.name).join(" · ");
 
               return (
@@ -353,8 +453,16 @@ export default function DashboardPage() {
         ) : agents.length ? (
           <div className="terminal-scroll max-h-[680px] overflow-y-auto pr-1">
             <div className="grid gap-5 xl:grid-cols-2">
-            {agents.map((agent) => (
-              <AgentCard key={agent.id} agent={agent} />
+            {effectiveAgents.map((agent) => (
+              <AgentCard
+                key={agent.id}
+                agent={agent}
+                status={getEffectiveAgentStatus(agent, localLaunches)}
+                onDelete={(currentAgent) => {
+                  void handleDeleteAgent(currentAgent);
+                }}
+                deleteLoading={deletingAgentId === agent.id}
+              />
             ))}
             </div>
           </div>
@@ -368,7 +476,7 @@ export default function DashboardPage() {
       {createOpen ? (
         <div className="fixed inset-0 z-40 overflow-y-auto bg-[#02070bcc]/80 p-3 backdrop-blur-sm sm:p-4">
           <div className="flex min-h-full items-start justify-center py-3 sm:items-center">
-          <div className="w-full max-w-xl rounded-[1.6rem] border border-white/10 bg-[#101821]/95 p-4 shadow-[0_24px_80px_rgba(0,0,0,0.45)] sm:rounded-[1.9rem] sm:p-6">
+          <div className="w-full max-w-3xl rounded-[1.6rem] border border-white/10 bg-[#101821]/95 p-4 shadow-[0_24px_80px_rgba(0,0,0,0.45)] sm:rounded-[1.9rem] sm:p-6">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
               <div className="min-w-0">
                 <h3 className="text-xl font-semibold text-white">{createdConnection ? "Токен подключения" : "Подключить агент"}</h3>
@@ -390,31 +498,36 @@ export default function DashboardPage() {
             {createdConnection ? (
               <div className="mt-6 space-y-4">
                 <div className="rounded-2xl border border-accent/15 bg-accent/[0.08] px-4 py-4 text-sm text-white/70">
-                  Токен подключения готов.
+                  Токен подключения готов. Ниже уже собраны команды под {instructionPlatform === "linux" ? "Linux" : "Windows"}.
                 </div>
                 <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-4 text-sm leading-6 text-white/65">
                   <div>
                     Токен привязан к агенту <span className="font-medium text-white">{createdConnection.name || "Без имени"}</span>.
                   </div>
-                  <div className="mt-2 break-all font-mono text-xs text-[#9af7c8]">
-                    agentId: {createdConnection.agentId}
-                  </div>
                   <div className="mt-3 text-xs text-white/45">
                     Сервис на машине нужно запускать именно с этим токеном. Команды потом отправляй в эту же карточку агента.
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      handleCloseCreate();
-                      router.push(`/dashboard/agents/${createdConnection.agentId}`);
-                    }}
-                    className="mt-4 inline-flex items-center justify-center rounded-xl border border-accent/20 px-3 py-2 text-sm text-accent transition hover:bg-accent/10"
-                  >
-                    Открыть карточку этого агента
-                  </button>
+                  <div className="mt-4">
+                    <CopyableInstructionBlock
+                      title="Agent ID"
+                      description="Можно быстро сверить, что сервис поднят именно для этой карточки."
+                      value={createdConnection.agentId}
+                      copied={copiedInstructionId === "agent-id"}
+                      onCopy={() => {
+                        void handleCopyInstruction("agent-id", createdConnection.agentId);
+                      }}
+                    />
+                  </div>
                 </div>
+
                 <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-4 text-sm leading-6 text-white/60">
-                  <div className="text-sm font-medium text-white">Как подключить агент</div>
+                  <div>
+                    <div className="text-sm font-medium text-white">Как подключить агент</div>
+                    <div className="mt-2 text-xs text-white/45">
+                      Скопируй команды по шагам. Иконка справа копирует содержимое блока, после нажатия на 3 секунды появляется галочка.
+                    </div>
+                  </div>
+
                   <div className="mt-4 inline-flex w-full rounded-full border border-white/10 bg-black/20 p-1 sm:w-auto">
                     <button
                       type="button"
@@ -436,72 +549,119 @@ export default function DashboardPage() {
                     </button>
                   </div>
 
-                  <div className="mt-4 rounded-2xl border border-white/8 bg-black/20 p-4">
-                    <div>
-                      <div className="text-xs uppercase tracking-[0.2em] text-white/40">Адрес сервера для агента</div>
-                      <div className="mt-2 text-xs text-white/45">Если агент ставишь на другую машину или ВМ, подставь сюда IP или домен сервера вместо `localhost`.</div>
-                      <input
-                        value={agentServerUrl}
-                        onChange={(event) => setAgentServerUrl(event.target.value)}
-                        placeholder={DEFAULT_AGENT_SERVER_URL}
-                        className="mt-3 w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white outline-none focus:border-accent/25"
+                  <div className="mt-5 grid gap-4 xl:grid-cols-3">
+                    <InstructionStepCard
+                      step="Шаг 1"
+                      title="Установить CLI"
+                      description="Сначала подготовь pipx и сам `syseye-agent`."
+                    >
+                      <CopyableInstructionBlock
+                        title="Установка pipx"
+                        description="Если pipx ещё не установлен."
+                        value={instructionPlatform === "linux" ? "sudo pacman -S python-pipx" : WINDOWS_PIPX_INSTALL}
+                        copied={copiedInstructionId === "install-pipx"}
+                        onCopy={() => {
+                          void handleCopyInstruction(
+                            "install-pipx",
+                            instructionPlatform === "linux" ? "sudo pacman -S python-pipx" : WINDOWS_PIPX_INSTALL,
+                          );
+                        }}
                       />
-                    </div>
 
-                    <div className="text-xs uppercase tracking-[0.2em] text-white/40">
-                      {instructionPlatform === "linux" ? "Linux" : "Windows"}
-                    </div>
-
-                    <div className="mt-5">
-                      <div className="text-xs uppercase tracking-[0.2em] text-white/40">Шаг 1. Установить CLI</div>
-                      <div className="mt-2 text-xs text-white/45">Если `pipx` ещё не установлен:</div>
-                      <div className="mt-2 rounded-xl border border-white/8 bg-black/25 px-3 py-2 font-mono text-xs break-all whitespace-pre-wrap text-[#9af7c8]">
-                        {instructionPlatform === "linux" ? "sudo pacman -S python-pipx" : WINDOWS_PIPX_INSTALL}
+                      <div className="mt-3">
+                        <CopyableInstructionBlock
+                          title="Установка CLI"
+                          description="Эту команду можно запускать из любой папки."
+                          value={CLI_PYPI_INSTALL}
+                          copied={copiedInstructionId === "install-cli"}
+                          onCopy={() => {
+                            void handleCopyInstruction("install-cli", CLI_PYPI_INSTALL);
+                          }}
+                        />
                       </div>
-                      <div className="mt-2 text-xs text-white/45">Установка агента из PyPI доступна из любой папки:</div>
-                      <div className="mt-2 rounded-xl border border-white/8 bg-black/25 px-3 py-2 font-mono text-xs break-all whitespace-pre-wrap text-[#9af7c8]">
-                        {CLI_PYPI_INSTALL}
-                      </div>
-                      {instructionPlatform === "windows" ? <div className="mt-2 text-xs text-white/45">{WINDOWS_PATH_REFRESH_NOTE}</div> : null}
-                    </div>
 
-                    <div className="mt-4">
-                      <div className="text-xs uppercase tracking-[0.2em] text-white/40">Шаг 2. Сгенерировать сервис</div>
-                      {instructionPlatform === "linux" ? (
-                        <div className="mt-2 rounded-xl border border-white/8 bg-black/25 px-3 py-2 font-mono text-xs break-all whitespace-pre-wrap text-[#9af7c8]">
-                          mkdir -p ~/.config/systemd/user
+                      {instructionPlatform === "windows" ? (
+                        <div className="mt-3 text-xs leading-5 text-white/45">
+                          {WINDOWS_PATH_REFRESH_NOTE}
                         </div>
+                      ) : null}
+                    </InstructionStepCard>
+
+                    <InstructionStepCard
+                      step="Шаг 2"
+                      title="Сгенерировать сервис"
+                      description={instructionPlatform === "linux" ? "Создай `systemd --user` unit." : "Сгенерируй PowerShell-скрипт для автозапуска."}
+                    >
+                      {instructionPlatform === "linux" ? (
+                        <CopyableInstructionBlock
+                          title="Подготовка директории"
+                          value="mkdir -p ~/.config/systemd/user"
+                          copied={copiedInstructionId === "prepare-service-dir"}
+                          onCopy={() => {
+                            void handleCopyInstruction("prepare-service-dir", "mkdir -p ~/.config/systemd/user");
+                          }}
+                        />
                       ) : (
-                        <div className="mt-2 text-xs text-white/45">
+                        <div className="rounded-xl border border-white/8 bg-black/20 px-3 py-3 text-xs leading-5 text-white/55">
                           Сохрани текст ниже в файл <code>install-syseye-agent.ps1</code>.
                         </div>
                       )}
-                        <div className="mt-2 rounded-xl border border-white/8 bg-black/25 px-3 py-2 font-mono text-xs break-all whitespace-pre-wrap text-[#9af7c8]">
-                          {instructionPlatform === "linux"
-                          ? buildLinuxServiceGenerateCommand(agentServerUrl, createdConnection.token)
-                          : buildWindowsInstallScriptContent(agentServerUrl, createdConnection.token)}
-                        </div>
-                    </div>
 
-                    <div className="mt-4">
-                      <div className="text-xs uppercase tracking-[0.2em] text-white/40">Шаг 3. Запустить агента в фоне</div>
-                      <div className="mt-2 rounded-xl border border-white/8 bg-black/25 px-3 py-2 font-mono text-xs break-all whitespace-pre-wrap text-[#9af7c8]">
-                        {instructionPlatform === "linux"
+                      <div className="mt-3">
+                        <CopyableInstructionBlock
+                          title={instructionPlatform === "linux" ? "Команда генерации" : "Содержимое install-syseye-agent.ps1"}
+                          value={instructionPlatform === "linux"
+                            ? buildLinuxServiceGenerateCommand(agentServerUrl, createdConnection.token)
+                            : buildWindowsInstallScriptContent(agentServerUrl, createdConnection.token)}
+                          copied={copiedInstructionId === "generate-service"}
+                          onCopy={() => {
+                            void handleCopyInstruction(
+                              "generate-service",
+                              instructionPlatform === "linux"
+                                ? buildLinuxServiceGenerateCommand(agentServerUrl, createdConnection.token)
+                                : buildWindowsInstallScriptContent(agentServerUrl, createdConnection.token),
+                            );
+                          }}
+                        />
+                      </div>
+                    </InstructionStepCard>
+
+                    <InstructionStepCard
+                      step="Шаг 3"
+                      title="Запустить в фоне"
+                      description="После этого агент должен выйти в online и начать слать heartbeat."
+                    >
+                      <CopyableInstructionBlock
+                        title="Старт агента"
+                        value={instructionPlatform === "linux"
                           ? LINUX_SERVICE_ENABLE_COMMAND
                           : WINDOWS_SERVICE_ENABLE_COMMAND}
-                      </div>
+                        copied={copiedInstructionId === "start-agent"}
+                        onCopy={() => {
+                          void handleCopyInstruction(
+                            "start-agent",
+                            instructionPlatform === "linux"
+                              ? LINUX_SERVICE_ENABLE_COMMAND
+                              : WINDOWS_SERVICE_ENABLE_COMMAND,
+                          );
+                        }}
+                      />
+
                       {instructionPlatform === "windows" ? (
-                        <div className="mt-2 text-xs text-white/45">
+                        <div className="mt-3 text-xs leading-5 text-white/45">
                           Запусти команду один раз. После старта агента в hidden/background режиме терминал можно закрыть.
                         </div>
                       ) : null}
-                    </div>
+                    </InstructionStepCard>
                   </div>
                 </div>
               </div>
             ) : (
               <div className="mt-6 space-y-4">
                 <Field label="Имя машины" value={newAgentName} onChange={setNewAgentName} placeholder="Например: Main Office PC" />
+                <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3 text-sm text-white/60">
+                  ОС и дистрибутив агент определит сам при первом подключении.
+                </div>
               </div>
             )}
 
@@ -579,7 +739,7 @@ export default function DashboardPage() {
                   <div className="mt-4 grid max-h-[420px] gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
                     {filteredGroupAgents.map((agent) => {
                       const selected = selectedGroupAgentIdSet.has(agent.id);
-                      const status = getAgentStatus(agent.lastHeartbeatAt);
+                      const status = getEffectiveAgentStatus(agent, localLaunches);
 
                       return (
                         <button
@@ -678,6 +838,64 @@ function Field({
         placeholder={placeholder}
         className="w-full rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-white outline-none focus:border-accent/25"
       />
+    </div>
+  );
+}
+
+function InstructionStepCard({
+  step,
+  title,
+  description,
+  children,
+}: {
+  step: string;
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="rounded-2xl border border-white/8 bg-black/20 p-4">
+      <div className="text-xs uppercase tracking-[0.2em] text-accent/80">{step}</div>
+      <div className="mt-2 text-base font-medium text-white">{title}</div>
+      <div className="mt-1 text-xs leading-5 text-white/45">{description}</div>
+      <div className="mt-4">{children}</div>
+    </div>
+  );
+}
+
+function CopyableInstructionBlock({
+  title,
+  value,
+  onCopy,
+  copied,
+  description,
+}: {
+  title: string;
+  value: string;
+  onCopy: () => void;
+  copied: boolean;
+  description?: string;
+}) {
+  return (
+    <div className="rounded-xl border border-white/8 bg-black/25 px-3 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[11px] uppercase tracking-[0.18em] text-white/35">{title}</div>
+          {description ? <div className="mt-1 text-xs leading-5 text-white/45">{description}</div> : null}
+        </div>
+        <button
+          type="button"
+          onClick={onCopy}
+          aria-label={copied ? "Скопировано" : "Скопировать"}
+          title={copied ? "Скопировано" : "Скопировать"}
+          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] text-white/70 transition hover:bg-white/[0.08]"
+        >
+          {copied ? <Check size={13} /> : <Copy size={13} />}
+        </button>
+      </div>
+      <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs text-[#9af7c8]">
+        {value}
+      </pre>
     </div>
   );
 }

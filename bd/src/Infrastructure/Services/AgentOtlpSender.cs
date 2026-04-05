@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using Infrastructure.Dto;
 using Infrastructure.Interfaces;
 using Infrastructure.Options;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace Infrastructure.Services;
@@ -10,9 +11,11 @@ namespace Infrastructure.Services;
 public sealed class AgentOtlpSender : IAgentOtlpSender, IDisposable
 {
     private readonly HttpClient _httpClient;
+    private readonly ILogger<AgentOtlpSender> _logger;
 
-    public AgentOtlpSender(IOptions<LokiOptions> options)
+    public AgentOtlpSender(IOptions<LokiOptions> options, ILogger<AgentOtlpSender> logger)
     {
+        _logger = logger;
         _httpClient = new HttpClient
         {
             BaseAddress = new Uri(options.Value.BaseUrl, UriKind.Absolute),
@@ -60,12 +63,34 @@ public sealed class AgentOtlpSender : IAgentOtlpSender, IDisposable
             ]
         };
 
-        using var response = await _httpClient.PostAsJsonAsync(
-            "/loki/api/v1/push",
-            payload,
-            cancellationToken);
+        try
+        {
+            using var response = await _httpClient.PostAsJsonAsync(
+                "/loki/api/v1/push",
+                payload,
+                cancellationToken);
 
-        response.EnsureSuccessStatusCode();
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "Loki отклонил execution log для agent {AgentId}. StatusCode: {StatusCode}",
+                    agentId,
+                    (int)response.StatusCode);
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "Не удалось отправить execution log в Loki для agent {AgentId}: таймаут соединения.",
+                agentId);
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Не удалось отправить execution log в Loki для agent {AgentId}. Продолжаю без внешнего log sink.",
+                agentId);
+        }
     }
 
     private static string MapLevel(string? level)

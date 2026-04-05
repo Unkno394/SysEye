@@ -68,7 +68,9 @@ On Windows, a detached hidden process is the most compatible option. This does n
 
 ```powershell
 $agentPath = (Get-Command syseye-agent).Source
-Start-Process -WindowStyle Hidden -FilePath $agentPath -ArgumentList @('connect', '--server', 'http://localhost:5000', '--token', 'YOUR_CONNECTION_TOKEN')
+$launchUrl = "syseye-agent://connect?server=$([Uri]::EscapeDataString('http://localhost:5000'))&token=$([Uri]::EscapeDataString('YOUR_CONNECTION_TOKEN'))"
+$logFile = Join-Path $HOME ".syseye-agent\agent.log"
+Start-Process -WindowStyle Hidden -FilePath $agentPath -ArgumentList @('open-url', $launchUrl, '--log-file', $logFile)
 ```
 
 Default background log file:
@@ -123,15 +125,17 @@ if (-not (Test-Path $agentPath)) {
 
 $server = "http://localhost:5000"
 $token = "YOUR_CONNECTION_TOKEN"
+$launchUrl = "syseye-agent://connect?server=$([Uri]::EscapeDataString($server))&token=$([Uri]::EscapeDataString($token))"
+$logFile = Join-Path $launcherDir "agent.log"
 $startupScriptPath = Join-Path $startupDir "SysEye Agent.vbs"
-$runCommand = '"' + $agentPath + '" connect --server "' + $server + '" --token "' + $token + '"'
+$runCommand = '"' + $agentPath + '" open-url "' + $launchUrl + '" --log-file "' + $logFile + '"'
 $vbsContent = @"
 Set WshShell = CreateObject("WScript.Shell")
 WshShell.Run ""$runCommand"", 0, False
 "@
 
 Set-Content -Path $startupScriptPath -Value $vbsContent -Encoding ASCII
-Start-Process -WindowStyle Hidden -FilePath $agentPath -ArgumentList @('connect', '--server', $server, '--token', $token)
+Start-Process -WindowStyle Hidden -FilePath $agentPath -ArgumentList @('open-url', $launchUrl, '--log-file', $logFile)
 Write-Host "SysEye Agent autostart installed to Startup folder and started."
 ```
 

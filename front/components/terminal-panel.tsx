@@ -1,17 +1,21 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CalendarRange, Play, TerminalSquare } from "lucide-react";
 import { apiJson } from "@/lib/api-client";
-import type { AgentDto, CommandDto, PagedResult, ScenarioDetailsDto, ScenarioDto, TaskExecutionDto, TaskStatus } from "@/lib/backend-types";
+import type { AgentDto, AgentStatus, AgentTaskDto, CommandDto, ExecutionLogDto, PagedResult, ScenarioDetailsDto, ScenarioDto, TaskExecutionDto, TaskStatus } from "@/lib/backend-types";
 import { getAgentStatus, getRelativeHeartbeatLabel } from "@/lib/backend-types";
 import { useClientRealtime } from "@/lib/client-realtime";
-import { buildDiagnosticComparisons, isIgnoredComparisonStatus, isSystemDiagnosticCommand } from "@/lib/diagnostics";
-import { extractPlaceholderTokens, getPlaceholderIndex, mapExecutionToHistoryItem } from "@/lib/execution-history";
+import { buildExecutionSummary, createOptimisticExecution, extractPlaceholderTokens, getPlaceholderIndex, isExecutionTerminalStatus, mapExecutionToHistoryItem } from "@/lib/execution-history";
+import { joinExecutionLogMessages, matchesExecutionLogRegex, mergeExecutionLogs } from "@/lib/execution-logs";
+import { ensureServerAgentOs } from "@/lib/local-agent-runtime";
 import { GlassCard, SectionTitle, StatusBadge } from "@/components/ui";
+
+const OPTIMISTIC_EXECUTION_TTL_MS = 2 * 60 * 1000;
 
 type TerminalTask = {
   id: string;
+  commandId: string;
   title: string;
   status: TaskStatus;
   createdAt: string;
@@ -19,6 +23,8 @@ type TerminalTask = {
   durationSeconds?: number | null;
   exitCode?: number | null;
   summary: string;
+  rawOutput?: string;
+  rawError?: string;
   kind: "command" | "scenario";
 };
 
@@ -37,6 +43,7 @@ type ExtendedHistoryStatusFilter = HistoryStatusFilter | "interrupted";
 type TerminalPanelProps = {
   agent: AgentDto;
   commands: CommandDto[];
+  status?: AgentStatus;
 };
 
 function formatTaskTime(value: string) {
@@ -50,6 +57,35 @@ function formatDuration(value?: number | null) {
   if (value < 1) return `${value.toFixed(2)} сек`;
   if (value < 10) return `${value.toFixed(1)} сек`;
   return `${Math.round(value)} сек`;
+}
+
+function shouldShowExitCode(task: TerminalTask) {
+  if (task.exitCode == null) return false;
+  if (task.exitCode !== 0) return true;
+  return task.status !== "success";
+}
+
+function canCancelTask(task: TerminalTask) {
+  return task.status === "queued" || task.status === "running";
+}
+
+function buildTaskLog(task: TerminalTask) {
+  const stdout = String(task.rawOutput ?? "").trim();
+  const stderr = String(task.rawError ?? "").trim();
+
+  if (!stdout && !stderr) {
+    return "";
+  }
+
+  if (stdout && stderr) {
+    return [`stdout:\n${stdout}`, `stderr:\n${stderr}`].join("\n\n");
+  }
+
+  if (stderr) {
+    return `stderr:\n${stderr}`;
+  }
+
+  return stdout;
 }
 
 function resolveCommandForAgent(item: CommandDto, agent: AgentDto) {
@@ -69,7 +105,23 @@ function matchesCommandPlatform(command: CommandDto, filter: CommandPlatformFilt
   if (filter === "linux") return hasBash;
   return hasPowerShell;
 }
-export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
+
+function normalizeExecutionIds(value: unknown) {
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    return normalized ? [normalized] : [];
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === "string" ? item.trim() : ""))
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+export function TerminalPanel({ agent, commands, status }: TerminalPanelProps) {
   const [serverExecutions, setServerExecutions] = useState<TaskExecutionDto[]>([]);
   const [loadedScenarios, setLoadedScenarios] = useState<ScenarioDetailsDto[]>([]);
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -87,22 +139,126 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
   const [scenarioQuery, setScenarioQuery] = useState("");
   const [scenarioFilter, setScenarioFilter] = useState<ScenarioFilter>("all");
   const [runtimeNotice, setRuntimeNotice] = useState<string | null>(null);
-  const panelStatus = getAgentStatus(agent.lastHeartbeatAt);
+  const [expandedTaskIds, setExpandedTaskIds] = useState<string[]>([]);
+  const [executionLogsByTaskId, setExecutionLogsByTaskId] = useState<Record<string, ExecutionLogDto[]>>({});
+  const [regexLogsByTaskId, setRegexLogsByTaskId] = useState<Record<string, ExecutionLogDto[]>>({});
+  const [loadingLogsTaskIds, setLoadingLogsTaskIds] = useState<string[]>([]);
+  const optimisticExecutionDeadlinesRef = useRef<Record<string, number>>({});
+  const panelStatus = status ?? getAgentStatus(agent.lastHeartbeatAt);
+  const isAgentOnline = panelStatus === "online";
   const commandsById = useMemo(() => new Map(commands.map((command) => [command.id, command])), [commands]);
 
-  const loadTasks = async () => {
+  const scheduleTasksReload = () => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.setTimeout(() => {
+      void loadTasks();
+    }, 1_200);
+    window.setTimeout(() => {
+      void loadTasks();
+    }, 4_000);
+  };
+
+  const pushOptimisticTask = (executionId: string, commandId: string) => {
+    const normalizedExecutionId = executionId.trim();
+    if (!normalizedExecutionId) {
+      return;
+    }
+
+    const title = commandsById.get(commandId)?.name?.trim() || `Команда ${commandId.slice(0, 8)}`;
+    const optimisticTask = createOptimisticExecution({
+      id: normalizedExecutionId,
+      agentId: agent.id,
+      commandId,
+      title,
+    });
+    optimisticExecutionDeadlinesRef.current = {
+      ...optimisticExecutionDeadlinesRef.current,
+      [normalizedExecutionId]: Date.now() + OPTIMISTIC_EXECUTION_TTL_MS,
+    };
+
+    setServerExecutions((current) => [optimisticTask, ...current.filter((item) => item.id !== normalizedExecutionId)]);
+  };
+
+  const mergeLoadedExecutions = useCallback((loadedExecutions: TaskExecutionDto[]) => {
+    const now = Date.now();
+    const optimisticDeadlines = optimisticExecutionDeadlinesRef.current;
+    const loadedExecutionIds = new Set(loadedExecutions.map((execution) => execution.id));
+
+    setServerExecutions((current) => {
+      const preservedOptimisticExecutions = current.filter((execution) => {
+        const optimisticDeadline = optimisticDeadlines[execution.id];
+        if (!optimisticDeadline || optimisticDeadline <= now) {
+          return false;
+        }
+
+        return !loadedExecutionIds.has(execution.id);
+      });
+
+      return [...loadedExecutions, ...preservedOptimisticExecutions];
+    });
+
+    optimisticExecutionDeadlinesRef.current = Object.fromEntries(
+      Object.entries(optimisticDeadlines).filter(([executionId, optimisticDeadline]) => (
+        optimisticDeadline > now && !loadedExecutionIds.has(executionId)
+      )),
+    );
+  }, []);
+
+  const patchExecutionFromRealtime = (task: AgentTaskDto) => {
+    const executionId = String(task.id ?? "").trim();
+    if (!executionId) {
+      return;
+    }
+
+    setServerExecutions((current) => {
+      const currentExecution = current.find((execution) => execution.id === executionId);
+      if (!currentExecution) {
+        return current;
+      }
+
+      const nextStatus = task.status ?? currentExecution.status;
+      const currentIsTerminal = isExecutionTerminalStatus(currentExecution.status);
+      const nextIsTerminal = isExecutionTerminalStatus(nextStatus);
+      if (currentIsTerminal && !nextIsTerminal) {
+        return current;
+      }
+
+      const nextExecution: TaskExecutionDto = {
+        ...currentExecution,
+        title: String(task.title ?? "").trim() || currentExecution.title,
+        startedAt: currentExecution.startedAt || task.createdAt,
+        status: nextStatus,
+        completedAt: nextIsTerminal
+          ? currentExecution.completedAt ?? new Date().toISOString()
+          : null,
+        exitCode: task.exitCode ?? currentExecution.exitCode ?? null,
+        resultSummary: "",
+        rawOutput: task.output ?? currentExecution.rawOutput ?? "",
+        rawError: task.error ?? currentExecution.rawError ?? "",
+      };
+
+      nextExecution.resultSummary = buildExecutionSummary(nextExecution);
+
+      return [nextExecution, ...current.filter((execution) => execution.id !== executionId)];
+    });
+  };
+
+  const loadTasks = useCallback(async () => {
     try {
       const data = await apiJson<PagedResult<TaskExecutionDto>>(
         `/api/hackaton/task/agents/${agent.id}?take=50&skip=0`,
         { method: "GET" },
       );
-      setServerExecutions(data.items ?? []);
+      mergeLoadedExecutions(data.items ?? []);
     } catch {
-      setServerExecutions([]);
+      return;
     }
-  };
+  }, [agent.id, mergeLoadedExecutions]);
 
-  const loadScenarios = async () => {
+  const loadScenarios = useCallback(async () => {
     try {
       const data = await apiJson<PagedResult<ScenarioDto>>(
         "/api/hackaton/scenario?take=100&skip=0",
@@ -135,7 +291,7 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
     } catch {
       setLoadedScenarios([]);
     }
-  };
+  }, []);
 
   useEffect(() => {
     void loadTasks();
@@ -147,45 +303,60 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [agent.id]);
-
-  useClientRealtime(
-    {
-      onTaskQueued: ({ agentId }) => {
-        if (agentId === agent.id) {
-          void loadTasks();
-        }
-      },
-      onTaskUpdated: ({ agentId }) => {
-        if (agentId === agent.id) {
-          void loadTasks();
-        }
-      },
-    },
-    Boolean(agent.id),
-  );
+  }, [loadScenarios, loadTasks]);
 
   const tasks = useMemo(() => {
     return [...serverExecutions]
       .map((execution) => mapExecutionToHistoryItem(execution, commandsById))
       .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
   }, [commandsById, serverExecutions]);
+  const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
 
-  const basicCheckCommands = useMemo(() => commands.filter(isSystemDiagnosticCommand), [commands]);
+  const expandedExecutionIds = useMemo(() => expandedTaskIds.filter(Boolean), [expandedTaskIds]);
 
-  const diagnosticComparisons = useMemo(
-    () => buildDiagnosticComparisons(serverExecutions, commandsById),
-    [commandsById, serverExecutions],
+  useClientRealtime(
+    {
+      onTaskQueued: ({ agentId, task }) => {
+        if (agentId === agent.id) {
+          patchExecutionFromRealtime(task);
+          void loadTasks();
+        }
+      },
+      onTaskUpdated: ({ agentId, task }) => {
+        if (agentId === agent.id) {
+          patchExecutionFromRealtime(task);
+          void loadTasks();
+        }
+      },
+      onExecutionLogReceived: (entry) => {
+        const executionId = String(entry.executionId ?? "").trim();
+        if (!executionId || !expandedExecutionIds.includes(executionId)) {
+          return;
+        }
+
+        setExecutionLogsByTaskId((current) => ({
+          ...current,
+          [executionId]: mergeExecutionLogs(current[executionId] ?? [], [entry]),
+        }));
+
+        const task = taskById.get(executionId);
+        const command = task ? commandsById.get(task.commandId) : null;
+        if (command?.logRegex?.trim() && matchesExecutionLogRegex(entry.message, command.logRegex)) {
+          setRegexLogsByTaskId((current) => ({
+            ...current,
+            [executionId]: mergeExecutionLogs(current[executionId] ?? [], [entry]),
+          }));
+        }
+      },
+      executionIds: expandedExecutionIds,
+    },
+    Boolean(agent.id),
   );
 
   const visibleCommands = useMemo(() => {
     const normalizedQuery = commandQuery.trim().toLowerCase();
 
     return commands.filter((command) => {
-      if (isSystemDiagnosticCommand(command)) {
-        return false;
-      }
-
       if (!matchesCommandPlatform(command, commandPlatformFilter)) {
         return false;
       }
@@ -238,22 +409,104 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
   const executeTemplateCommand = async (commandId: string, values: Record<number, string>) => {
     setRuntimeNotice(null);
 
-    await apiJson<unknown>(
-      `/api/hackaton/task/agents/${agent.id}/execute`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          commandId,
-          placeholderValues: values,
-        }),
-      },
-      "Не удалось запустить шаблонную команду.",
-    );
+    if (!isAgentOnline) {
+      setRuntimeNotice("Агент оффлайн. Дождись реального heartbeat, потом запускай команду.");
+      return;
+    }
 
-    await loadTasks();
+    try {
+      await ensureServerAgentOs(agent);
+      const response = await apiJson<unknown>(
+        `/api/hackaton/task/agents/${agent.id}/execute`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            commandId,
+            placeholderValues: values,
+          }),
+        },
+        "Не удалось запустить шаблонную команду.",
+      );
+
+      const executionIds = normalizeExecutionIds(response);
+      const commandName = commandsById.get(commandId)?.name?.trim() || `Команда ${commandId.slice(0, 8)}`;
+
+      executionIds.forEach((executionId) => {
+        pushOptimisticTask(executionId, commandId);
+      });
+
+      setRuntimeNotice(`Команда "${commandName}" поставлена в очередь.`);
+      scheduleTasksReload();
+    } catch (error) {
+      setRuntimeNotice(error instanceof Error ? error.message : "Не удалось запустить шаблонную команду.");
+    }
+  };
+
+  const executeScenario = async (scenarioId: string) => {
+    if (!isAgentOnline) {
+      setRuntimeNotice("Агент оффлайн. Сценарий не стартует, пока машина не пришлёт heartbeat.");
+      return;
+    }
+
+    const scenario = loadedScenarios.find((item) => item.id === scenarioId);
+    if (!scenario) {
+      setRuntimeNotice("Сценарий не найден.");
+      return;
+    }
+
+    const runnableCommands = (scenario.commands ?? [])
+      .map((step) => commandsById.get(step.commandId))
+      .filter((command): command is CommandDto => Boolean(command))
+      .filter((command) => {
+        const resolvedCommand = resolveCommandForAgent(command, agent);
+        return Boolean(resolvedCommand.trim()) && extractPlaceholderTokens(resolvedCommand).length === 0;
+      });
+
+    if (!runnableCommands.length) {
+      setRuntimeNotice(`В сценарии "${scenario.name}" нет шагов, которые можно сразу отправить на этого агента.`);
+      return;
+    }
+
+    setRuntimeNotice(null);
+
+    try {
+      await ensureServerAgentOs(agent);
+      const response = await apiJson<unknown>(
+        `/api/hackaton/task/agents/${agent.id}/scenario`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            scenarioId,
+          }),
+        },
+        "Не удалось запустить сценарий.",
+      );
+
+      const executionIds = normalizeExecutionIds(response);
+      const queuedCommands = (scenario.commands ?? [])
+        .map((step) => commandsById.get(step.commandId))
+        .filter((command): command is CommandDto => Boolean(command));
+
+      executionIds.forEach((executionId, index) => {
+        const command = queuedCommands[index];
+        if (command) {
+          pushOptimisticTask(executionId, command.id);
+        }
+      });
+
+      setRuntimeNotice(`Сценарий "${scenario.name}" поставлен в очередь: ${runnableCommands.length} шагов.`);
+      scheduleTasksReload();
+    } catch (error) {
+      setRuntimeNotice(error instanceof Error ? error.message : "Не удалось запустить сценарий.");
+    }
   };
 
   const handleCommandClick = (item: CommandDto) => {
+    if (!isAgentOnline) {
+      setRuntimeNotice("Агент оффлайн. Новые команды сейчас не отправляются.");
+      return;
+    }
+
     const resolvedCommand = resolveCommandForAgent(item, agent);
     if (!resolvedCommand.trim()) {
       setRuntimeNotice(`Для агента ${agent.name} у команды "${item.name}" нет подходящего скрипта под текущую платформу.`);
@@ -302,7 +555,118 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
   };
 
   const handleScenarioClick = (scenarioId: string) => {
-    setRuntimeNotice("Новый backend пока не запускает сценарии напрямую на агенте. Их можно редактировать, но запуск для этой модели ещё не добавлен.");
+    void executeScenario(scenarioId);
+  };
+
+  const loadExecutionLogs = async (task: TerminalTask) => {
+    if (loadingLogsTaskIds.includes(task.id)) {
+      return;
+    }
+
+    setLoadingLogsTaskIds((current) => [...current, task.id]);
+
+    try {
+      const logs = await apiJson<ExecutionLogDto[]>(
+        `/api/hackaton/logs/executions/${task.id}?limit=200`,
+        { method: "GET" },
+        "Не удалось загрузить лог выполнения.",
+      );
+
+      setExecutionLogsByTaskId((current) => ({
+        ...current,
+        [task.id]: mergeExecutionLogs(current[task.id] ?? [], logs ?? []),
+      }));
+
+      const command = commandsById.get(task.commandId);
+      if (command?.logRegex?.trim()) {
+        try {
+          const regexLogs = await apiJson<ExecutionLogDto[]>(
+            `/api/hackaton/logs/executions/${task.id}/regex?limit=200`,
+            { method: "GET" },
+            "Не удалось загрузить regex-логи.",
+          );
+
+          setRegexLogsByTaskId((current) => ({
+            ...current,
+            [task.id]: mergeExecutionLogs(current[task.id] ?? [], regexLogs ?? []),
+          }));
+        } catch {
+          setRegexLogsByTaskId((current) => ({
+            ...current,
+            [task.id]: [],
+          }));
+        }
+      }
+    } catch {
+      setExecutionLogsByTaskId((current) => ({
+        ...current,
+        [task.id]: [],
+      }));
+    } finally {
+      setLoadingLogsTaskIds((current) => current.filter((item) => item !== task.id));
+    }
+  };
+
+  const toggleTaskLogs = (task: TerminalTask) => {
+    const isExpanded = expandedTaskIds.includes(task.id);
+
+    setExpandedTaskIds((current) =>
+      isExpanded ? current.filter((item) => item !== task.id) : [...current, task.id],
+    );
+
+    if (!isExpanded && executionLogsByTaskId[task.id] === undefined) {
+      void loadExecutionLogs(task);
+    }
+  };
+
+  const buildHttpLog = (task: TerminalTask) => {
+    const logs = executionLogsByTaskId[task.id] ?? [];
+    if (!logs.length) {
+      return "";
+    }
+
+    return joinExecutionLogMessages(logs);
+  };
+
+  const buildRegexLog = (task: TerminalTask) => {
+    const logs = regexLogsByTaskId[task.id] ?? [];
+    if (!logs.length) {
+      return "";
+    }
+
+    return joinExecutionLogMessages(logs);
+  };
+
+  const cancelTask = async (task: TerminalTask) => {
+    try {
+      await apiJson<void>(
+        `/api/hackaton/task/executions/${task.id}/cancel`,
+        { method: "POST" },
+        "Не удалось прервать выполнение.",
+      );
+
+      delete optimisticExecutionDeadlinesRef.current[task.id];
+      setServerExecutions((current) => current.map((execution) => {
+        if (execution.id !== task.id) {
+          return execution;
+        }
+
+        const nextExecution: TaskExecutionDto = {
+          ...execution,
+          status: "cancelled",
+          completedAt: execution.completedAt ?? new Date().toISOString(),
+          resultSummary: "",
+          rawError: execution.rawError || "command cancelled by user",
+        };
+
+        nextExecution.resultSummary = buildExecutionSummary(nextExecution);
+        return nextExecution;
+      }));
+      setRuntimeNotice(`Команда "${task.title}" отменена.`);
+      void loadTasks();
+    } catch (error) {
+      setRuntimeNotice(error instanceof Error ? error.message : "Не удалось прервать выполнение.");
+    }
   };
 
   const handleSubmitPlaceholderCommand = () => {
@@ -351,94 +715,6 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
       <div className="grid gap-0 lg:grid-cols-[minmax(0,1fr)_340px]">
         <div className="min-h-[420px] bg-[#03090d] p-3 text-sm sm:p-5">
           <div className="mb-4 rounded-2xl border border-white/8 bg-white/[0.03] p-3">
-            <div className="rounded-xl border border-accent/30 bg-accent/12 px-3 py-2 text-xs uppercase tracking-[0.18em] text-accent">
-              Базовые проверки
-            </div>
-            <div className="mt-2 text-xs leading-5 text-white/50">
-              Готовые системные снимки машины. В сравнение попадают только два последних успешных запуска, а прерванные и отменённые команды автоматически исключаются.
-            </div>
-
-            <div className="terminal-scroll mt-3 flex gap-3 overflow-x-auto pb-1">
-              {basicCheckCommands.map((item) => {
-                const resolvedCommand = resolveCommandForAgent(item, agent);
-                const hasPlaceholders = extractPlaceholderTokens(resolvedCommand).length > 0;
-
-                return (
-                  <button
-                    key={`diagnostic-${item.id}`}
-                    type="button"
-                    onClick={() => handleCommandClick(item)}
-                    className="w-[280px] shrink-0 rounded-2xl border border-white/8 bg-black/20 p-3 text-left transition hover:border-line hover:bg-white/[0.04] sm:w-[300px]"
-                  >
-                    <div className="break-words font-medium text-white">{item.name}</div>
-                    <div className="mt-2 text-xs text-white/50">{item.description || "Описание не задано."}</div>
-                    <div className="mt-3 overflow-hidden rounded-xl border border-white/8 bg-[#041016] px-3 py-2 font-mono text-xs text-[#9af7c8] break-words">
-                      {resolvedCommand || "Скрипт не задан"}
-                    </div>
-                    <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                      <span className="text-xs text-white/40">{hasPlaceholders ? "Нужны параметры перед запуском" : "Снимок готов к запуску"}</span>
-                      <span className="inline-flex items-center gap-1 text-xs text-accent">
-                        <Play size={12} />
-                        Запустить
-                      </span>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="mt-4 grid gap-3 xl:grid-cols-2">
-              {diagnosticComparisons.map((comparison) => {
-                const latestStatus = comparison.latestAttemptStatus ?? comparison.latestSuccessfulRun?.status ?? "sent";
-                const summary = comparison.latestSuccessfulRun?.resultSummary?.trim() || "Снимок пока не собран.";
-
-                return (
-                  <div key={`comparison-${comparison.command.id}`} className="rounded-2xl border border-white/8 bg-black/20 p-4">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="min-w-0">
-                        <div className="font-medium text-white">{comparison.command.name}</div>
-                        <div className="mt-1 text-xs text-white/45">
-                          Последняя попытка: {comparison.latestAttemptAt ? formatTaskTime(comparison.latestAttemptAt) : "ещё не запускалась"}
-                        </div>
-                      </div>
-                      <StatusBadge status={latestStatus} />
-                    </div>
-
-                    <div className="mt-3 rounded-2xl border border-white/8 bg-[#081018] p-3 text-sm text-white/80">
-                      {summary}
-                    </div>
-
-                    <div className="mt-3 text-xs text-white/55">
-                      {comparison.comparisonState === "unchanged" ? "Без изменений относительно предыдущего успешного снимка." : null}
-                      {comparison.comparisonState === "changed" ? "Есть изменения относительно предыдущего успешного снимка." : null}
-                      {comparison.comparisonState === "no-baseline" ? "Есть только один успешный снимок. Сравнение появится после следующего удачного запуска." : null}
-                      {comparison.comparisonState === "no-data" ? "У этой проверки пока нет успешного снимка." : null}
-                    </div>
-
-                    {isIgnoredComparisonStatus(comparison.latestAttemptStatus) ? (
-                      <div className="mt-3 rounded-2xl border border-amber-400/20 bg-amber-400/10 px-3 py-2 text-xs text-amber-100/90">
-                        Последний запуск был прерван и исключён из сравнения.
-                      </div>
-                    ) : null}
-
-                    {comparison.addedLines.length ? (
-                      <div className="mt-3 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 px-3 py-2 text-xs text-emerald-100/90">
-                        + {comparison.addedLines.join(" · ")}
-                      </div>
-                    ) : null}
-
-                    {comparison.removedLines.length ? (
-                      <div className="mt-3 rounded-2xl border border-rose-400/20 bg-rose-400/10 px-3 py-2 text-xs text-rose-100/90">
-                        - {comparison.removedLines.join(" · ")}
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="mb-4 rounded-2xl border border-white/8 bg-white/[0.03] p-3">
             <div className="flex items-center gap-2 rounded-xl border border-accent/30 bg-accent/12 px-3 py-2 text-xs uppercase tracking-[0.18em] text-accent">
               <TerminalSquare size={14} />
               Команды
@@ -479,15 +755,21 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
                 const resolvedCommand = resolveCommandForAgent(item, agent);
                 const hasPlaceholders = extractPlaceholderTokens(resolvedCommand).length > 0;
                 const isRunnable = Boolean(resolvedCommand.trim());
+                const isStartDisabled = !isRunnable || !isAgentOnline;
+                const availabilityText = !isAgentOnline
+                  ? "Агент оффлайн. Запуск станет доступен после heartbeat"
+                  : isRunnable
+                    ? (hasPlaceholders ? "Нужны параметры перед запуском" : "Готова к запуску")
+                    : "Нет скрипта под текущую платформу";
 
                 return (
                   <button
                     key={item.id}
                     type="button"
-                    disabled={!isRunnable}
+                    disabled={isStartDisabled}
                     onClick={() => handleCommandClick(item)}
                     className={`w-[280px] shrink-0 rounded-2xl border p-3 text-left transition sm:w-[300px] ${
-                      isRunnable
+                      !isStartDisabled
                         ? "border-white/8 bg-black/20 hover:border-line hover:bg-white/[0.04]"
                         : "cursor-not-allowed border-amber-500/20 bg-amber-500/5 opacity-75"
                     }`}
@@ -503,12 +785,10 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
                       {resolvedCommand || "Скрипт не задан"}
                     </div>
                     <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                      <span className="text-xs text-white/40">
-                        {isRunnable ? (hasPlaceholders ? "Нужны параметры перед запуском" : "Готова к запуску") : "Нет скрипта под текущую платформу"}
-                      </span>
-                      <span className={`inline-flex items-center gap-1 text-xs ${isRunnable ? "text-accent" : "text-white/30"}`}>
+                      <span className="text-xs text-white/40">{availabilityText}</span>
+                      <span className={`inline-flex items-center gap-1 text-xs ${!isStartDisabled ? "text-accent" : "text-white/30"}`}>
                         <Play size={12} />
-                        {isRunnable ? "Запустить" : "Недоступно"}
+                        {!isAgentOnline ? "Оффлайн" : isRunnable ? "Запустить" : "Недоступно"}
                       </span>
                     </div>
                   </button>
@@ -557,33 +837,42 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
             </div>
 
             <div className="terminal-scroll mt-3 flex gap-3 overflow-x-auto pb-1">
-              {visibleScenarios.map((scenario) => (
-                <button
-                  key={scenario.id}
-                  type="button"
-                  onClick={() => handleScenarioClick(scenario.id)}
-                  className="w-[280px] shrink-0 rounded-2xl border border-white/8 bg-black/20 p-3 text-left transition hover:border-amber-400/20 hover:bg-white/[0.04] sm:w-[300px]"
-                >
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="break-words font-medium text-white">{scenario.name}</div>
-                    <span className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-white/40">
-                      {scenario.isSystem ? "system" : "custom"}
-                    </span>
-                  </div>
-                  <div className="mt-2 text-xs text-white/50">{scenario.description}</div>
-                  <div className="mt-3 rounded-xl border border-white/8 bg-[#041016] px-3 py-2 text-xs text-white/55">
-                    {(scenario.commands ?? []).map((command, index) => (
-                      <div key={`${scenario.id}-${command.commandId}`} className="truncate">
-                        {index + 1}. {command.commandName}
-                      </div>
-                    ))}
-                  </div>
-                  <div className="mt-3 inline-flex items-center gap-1 text-xs text-amber-200">
-                    <Play size={12} />
-                    Пока без запуска
-                  </div>
-                </button>
-              ))}
+              {visibleScenarios.map((scenario) => {
+                const isScenarioDisabled = !isAgentOnline;
+
+                return (
+                  <button
+                    key={scenario.id}
+                    type="button"
+                    disabled={isScenarioDisabled}
+                    onClick={() => handleScenarioClick(scenario.id)}
+                    className={`w-[280px] shrink-0 rounded-2xl border p-3 text-left transition sm:w-[300px] ${
+                      isScenarioDisabled
+                        ? "cursor-not-allowed border-amber-500/20 bg-amber-500/5 opacity-75"
+                        : "border-white/8 bg-black/20 hover:border-amber-400/20 hover:bg-white/[0.04]"
+                    }`}
+                  >
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="break-words font-medium text-white">{scenario.name}</div>
+                      <span className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-white/40">
+                        {scenario.isSystem ? "system" : "custom"}
+                      </span>
+                    </div>
+                    <div className="mt-2 text-xs text-white/50">{scenario.description}</div>
+                    <div className="mt-3 rounded-xl border border-white/8 bg-[#041016] px-3 py-2 text-xs text-white/55">
+                      {(scenario.commands ?? []).map((command, index) => (
+                        <div key={`${scenario.id}-${command.commandId}`} className="truncate">
+                          {index + 1}. {command.commandName}
+                        </div>
+                      ))}
+                    </div>
+                    <div className={`mt-3 inline-flex items-center gap-1 text-xs ${isScenarioDisabled ? "text-white/30" : "text-amber-200"}`}>
+                      <Play size={12} />
+                      {isScenarioDisabled ? "Агент оффлайн" : "Запустить сценарий"}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
 
             {!visibleScenarios.length ? (
@@ -628,18 +917,66 @@ export function TerminalPanel({ agent, commands }: TerminalPanelProps) {
                             {formatDuration(task.durationSeconds)}
                           </span>
                         ) : null}
-                        {task.exitCode != null ? (
+                        {shouldShowExitCode(task) ? (
                           <span className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-white/45">
-                            exit {task.exitCode}
+                            код {task.exitCode}
                           </span>
                         ) : null}
                       </div>
                     </div>
-                    <StatusBadge status={task.status} />
+                    <div className="flex flex-col items-start gap-2 sm:items-end">
+                      <StatusBadge status={task.status} />
+                      {canCancelTask(task) ? (
+                        <button
+                          type="button"
+                          onClick={() => void cancelTask(task)}
+                          className="rounded-xl border border-rose-400/20 bg-rose-400/10 px-3 py-2 text-xs text-rose-100/90 transition hover:bg-rose-400/15"
+                        >
+                          Прервать
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
                   <div className="mt-3 rounded-2xl border border-white/8 bg-[#081018] p-3 text-sm text-white/80 break-words whitespace-pre-wrap">
                     {task.summary}
                   </div>
+                  {buildTaskLog(task) || executionLogsByTaskId[task.id] !== undefined || commandsById.get(task.commandId)?.logRegex ? (
+                    <div className="mt-3">
+                      <button
+                        type="button"
+                        onClick={() => toggleTaskLogs(task)}
+                        className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-white/65 transition hover:text-white"
+                      >
+                        {expandedTaskIds.includes(task.id) ? "Скрыть лог" : "Развернуть лог"}
+                      </button>
+                      {expandedTaskIds.includes(task.id) ? (
+                        <div className="mt-3 space-y-3">
+                          {loadingLogsTaskIds.includes(task.id) ? (
+                            <div className="rounded-2xl border border-white/8 bg-black/25 p-3 text-xs text-white/55">
+                              Загрузка логов...
+                            </div>
+                          ) : null}
+                          {buildHttpLog(task) ? (
+                            <div className="rounded-2xl border border-white/8 bg-black/25 p-3 font-mono text-xs text-[#9af7c8] break-words whitespace-pre-wrap">
+                              {buildHttpLog(task)}
+                            </div>
+                          ) : buildTaskLog(task) ? (
+                            <div className="rounded-2xl border border-white/8 bg-black/25 p-3 font-mono text-xs text-[#9af7c8] break-words whitespace-pre-wrap">
+                              {buildTaskLog(task)}
+                            </div>
+                          ) : null}
+                          {buildRegexLog(task) ? (
+                            <div className="rounded-2xl border border-amber-400/20 bg-amber-400/10 p-3">
+                              <div className="mb-2 text-[10px] uppercase tracking-[0.18em] text-amber-200/80">Regex matches</div>
+                              <div className="font-mono text-xs text-amber-100 break-words whitespace-pre-wrap">
+                                {buildRegexLog(task)}
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               ))}
 

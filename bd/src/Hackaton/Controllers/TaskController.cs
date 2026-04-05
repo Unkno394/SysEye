@@ -35,6 +35,42 @@ public class TaskController(
     }
 
     /// <summary>
+    /// Запускает выполнение сценария на указанном агенте.
+    /// </summary>
+    [Produces(typeof(IReadOnlyCollection<Guid>))]
+    [HttpPost("agents/{agentId:guid}/scenario")]
+    public async Task<IActionResult> ExecuteScenario(
+        [FromRoute] Guid agentId,
+        [FromBody] ExecuteScenarioRequest request,
+        CancellationToken cancellationToken)
+    {
+        var executionIds = await taskService.ExecuteScenarioAsync(
+            User.GetUserId(),
+            agentId,
+            request.ScenarioId,
+            cancellationToken);
+
+        return Ok(executionIds);
+    }
+
+    /// <summary>
+    /// Отменяет выполнение команды.
+    /// </summary>
+    [HttpPost("executions/{executionId:guid}/cancel")]
+    public async Task<IActionResult> CancelExecution(
+        [FromRoute] Guid executionId,
+        CancellationToken cancellationToken)
+    {
+        await taskService.CancelTaskAsync(
+            executionId,
+            User.GetUserId(),
+            cancellationToken);
+
+        logger.LogInformation("Пользователь запросил отмену выполнения {ExecutionId}", executionId);
+        return Ok();
+    }
+
+    /// <summary>
     /// Возвращает список выполнений команд для указанного агента.
     /// </summary>
     /// <param name="agentId">Идентификатор агента.</param>

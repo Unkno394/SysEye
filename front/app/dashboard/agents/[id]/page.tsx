@@ -6,25 +6,30 @@ import { useParams, useRouter } from "next/navigation";
 import { ChevronLeft, PencilLine, RefreshCw, Trash2 } from "lucide-react";
 import { GlassCard, PrimaryButton, StatusBadge } from "@/components/ui";
 import { TerminalPanel } from "@/components/terminal-panel";
-import { apiJson } from "@/lib/api-client";
+import { apiFetch, apiJson } from "@/lib/api-client";
+import { removeAgentFromGroups } from "@/lib/agent-groups";
 import { loadAllCommands } from "@/lib/commands";
 import {
+  type AgentLaunchPlatform,
   buildAgentReconnectUrl,
   buildLinuxServiceGenerateCommand,
   buildReconnectCommand,
   getDefaultAgentServerUrl,
   getCliInstallCommand,
+  getOsTypeForPlatform,
   getLinuxServiceEnableCommand,
+  inferLocalAgentPlatform,
   inferAgentServerUrl,
 } from "@/lib/agent-launch";
 import type { AgentConnectionTokenDto, AgentDto, CommandDto } from "@/lib/backend-types";
-import { getAgentStatus, getDistributionKey, getOsLabel, getRelativeHeartbeatLabel } from "@/lib/backend-types";
+import { getDistributionKey, getOsLabel, getRelativeHeartbeatLabel } from "@/lib/backend-types";
 import { useClientRealtime } from "@/lib/client-realtime";
+import { applyEffectiveAgentMetadata, getEffectiveAgentStatus, markAgentLaunched, useLocalAgentHeartbeats, useLocalAgentLaunches } from "@/lib/local-agent-runtime";
 
 export default function AgentDetailsPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
-  const agentId = params.id;
+  const agentId = params?.id ?? "";
 
   const [agent, setAgent] = useState<AgentDto | null>(null);
   const [commands, setCommands] = useState<CommandDto[]>([]);
@@ -36,12 +41,16 @@ export default function AgentDetailsPage() {
   const [reconnectLoading, setReconnectLoading] = useState(false);
   const [helpLoading, setHelpLoading] = useState(false);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  const [exportBusy, setExportBusy] = useState<"Json" | "Csv" | "Pdf" | null>(null);
+  const [exportMessage, setExportMessage] = useState<string | null>(null);
+  const [exportOverlayOpen, setExportOverlayOpen] = useState(false);
   const [editName, setEditName] = useState("");
   const [agentServerUrl, setAgentServerUrl] = useState(getDefaultAgentServerUrl());
   const [reconnectOpen, setReconnectOpen] = useState(false);
   const [reconnectToken, setReconnectToken] = useState<string | null>(null);
   const [reconnectCommandCopied, setReconnectCommandCopied] = useState(false);
-  const [reconnectPlatform, setReconnectPlatform] = useState<"linux" | "windows">("windows");
+  const [reconnectPlatform, setReconnectPlatform] = useState<AgentLaunchPlatform>(inferLocalAgentPlatform);
+  const localLaunches = useLocalAgentLaunches();
 
   const loadData = async (background = false) => {
     if (!background) {
@@ -105,6 +114,7 @@ export default function AgentDetailsPage() {
           return;
         }
 
+        removeAgentFromGroups(deletedAgentId);
         router.push("/dashboard");
         router.refresh();
       },
@@ -112,25 +122,28 @@ export default function AgentDetailsPage() {
     Boolean(agentId),
   );
 
-  const status = useMemo(() => (agent ? getAgentStatus(agent.lastHeartbeatAt) : "offline"), [agent]);
+  useLocalAgentHeartbeats(agent && localLaunches[agent.id] ? [agent.id] : []);
+
+  const effectiveAgent = useMemo(() => (agent ? applyEffectiveAgentMetadata(agent, localLaunches) : null), [agent, localLaunches]);
+  const status = useMemo(() => (agent ? getEffectiveAgentStatus(agent, localLaunches) : "offline"), [agent, localLaunches]);
   const reconnectCommand = useMemo(() => {
     if (!reconnectToken) return "";
-    return buildReconnectCommand(agentServerUrl, reconnectToken, agent?.os);
-  }, [agent?.os, agentServerUrl, reconnectToken]);
+    return buildReconnectCommand(agentServerUrl, reconnectToken, effectiveAgent?.os);
+  }, [effectiveAgent?.os, agentServerUrl, reconnectToken]);
   const reconnectUrl = useMemo(() => {
     if (!reconnectToken) return "";
     return buildAgentReconnectUrl(agentServerUrl, reconnectToken);
   }, [agentServerUrl, reconnectToken]);
   const preferredReconnectPlatform = useMemo<"linux" | "windows">(() => {
-    if (!agent) return "windows";
+    if (!effectiveAgent) return "windows";
 
-    const distributionKey = getDistributionKey(agent.distribution, agent.os);
+    const distributionKey = getDistributionKey(effectiveAgent.distribution, effectiveAgent.os);
     if (distributionKey !== "windows" && distributionKey !== "macos" && distributionKey !== "unknown") {
       return "linux";
     }
 
-    return agent.os === 1 ? "linux" : "windows";
-  }, [agent]);
+    return effectiveAgent.os === 1 ? "linux" : "windows";
+  }, [effectiveAgent]);
   const linuxCliInstallCommand = getCliInstallCommand();
   const linuxServiceEnableCommand = getLinuxServiceEnableCommand();
   const linuxServiceGenerateCommand = useMemo(() => {
@@ -139,6 +152,27 @@ export default function AgentDetailsPage() {
   }, [agentServerUrl, reconnectToken]);
   const showLinuxReconnectHelp = Boolean(reconnectOpen && reconnectToken && reconnectPlatform === "linux");
   const showWindowsReconnectHelp = Boolean(reconnectOpen && reconnectToken && reconnectPlatform === "windows");
+
+  const ensureAgentOs = async (platform: AgentLaunchPlatform) => {
+    if (!agent || agent.os != null) {
+      return;
+    }
+
+    try {
+      await apiJson<void>(
+        `/api/hackaton/agent/${agent.id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            os: getOsTypeForPlatform(platform),
+          }),
+        },
+        "Не удалось обновить платформу агента.",
+      );
+    } catch {
+      return;
+    }
+  };
 
   const handleSave = async () => {
     if (!agent) return;
@@ -187,17 +221,59 @@ export default function AgentDetailsPage() {
 
   const handleDelete = async () => {
     if (!agent) return;
+    if (!window.confirm(`Удалить агента "${agent.name}"?`)) {
+      return;
+    }
+
     setDeleteLoading(true);
     setError(null);
 
     try {
       await apiJson(`/api/hackaton/agent/${agent.id}`, { method: "DELETE" }, "Не удалось удалить агента.");
+      removeAgentFromGroups(agent.id);
       router.push("/dashboard");
       router.refresh();
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Не удалось удалить агента.");
     } finally {
       setDeleteLoading(false);
+    }
+  };
+
+  const handleExport = async (format: "Json" | "Csv" | "Pdf") => {
+    if (!agent) return;
+
+    setExportBusy(format);
+    setExportOverlayOpen(false);
+    setExportMessage(null);
+    setError(null);
+
+    try {
+      const query = new URLSearchParams({
+        format,
+        agentId: agent.id,
+      });
+      const response = await apiFetch(`/api/hackaton/export?${query.toString()}`, { method: "GET" });
+
+      if (!response.ok) {
+        throw new Error(`Экспорт ${format} вернул ошибку ${response.status}.`);
+      }
+
+      const blob = await response.blob();
+      const href = window.URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      const extension = format.toLowerCase();
+      anchor.href = href;
+      anchor.download = `${agent.name || "agent"}-export.${extension}`;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      window.URL.revokeObjectURL(href);
+      setExportMessage(`Экспорт ${format} подготовлен для агента ${agent.name}.`);
+    } catch (exportError) {
+      setError(exportError instanceof Error ? exportError.message : "Не удалось выполнить экспорт.");
+    } finally {
+      setExportBusy(null);
     }
   };
 
@@ -208,6 +284,8 @@ export default function AgentDetailsPage() {
     setError(null);
 
     try {
+      await ensureAgentOs(inferLocalAgentPlatform());
+
       const connection = await apiJson<AgentConnectionTokenDto>(
         `/api/hackaton/agent/${agent.id}/connection-token`,
         { method: "GET" },
@@ -215,6 +293,7 @@ export default function AgentDetailsPage() {
       );
 
       setReconnectToken(connection.token);
+      markAgentLaunched(agent.id, inferLocalAgentPlatform());
       window.location.assign(buildAgentReconnectUrl(agentServerUrl, connection.token));
       window.setTimeout(() => {
         void loadData(true);
@@ -245,6 +324,9 @@ export default function AgentDetailsPage() {
     setError(null);
 
     try {
+      const platform = effectiveAgent?.os === 1 ? "linux" : effectiveAgent?.os === 2 ? "windows" : inferLocalAgentPlatform();
+      await ensureAgentOs(platform);
+
       const connection = await apiJson<AgentConnectionTokenDto>(
         `/api/hackaton/agent/${agent.id}/connection-token`,
         { method: "GET" },
@@ -252,7 +334,7 @@ export default function AgentDetailsPage() {
       );
 
       setReconnectToken(connection.token);
-      setReconnectPlatform(preferredReconnectPlatform);
+      setReconnectPlatform(platform);
       setReconnectOpen(true);
     } catch (instructionError) {
       setError(instructionError instanceof Error ? instructionError.message : "Не удалось открыть инструкцию переподключения.");
@@ -281,11 +363,11 @@ export default function AgentDetailsPage() {
     return <GlassCard className="border border-rose-400/20 bg-rose-400/10 p-8 text-center text-rose-100/90">{error}</GlassCard>;
   }
 
-  if (!agent) {
+  if (!agent || !effectiveAgent) {
     return <GlassCard className="p-8 text-center text-white/55">Агент не найден.</GlassCard>;
   }
 
-  const machineDetails = [getOsLabel(agent.os), agent.ipAddress || null].filter(Boolean).join(" · ");
+  const machineDetails = [getOsLabel(effectiveAgent.os), effectiveAgent.ipAddress || null].filter(Boolean).join(" · ");
   const statusActionLabel = reconnectLoading
     ? "Запуск..."
     : heartbeatLoading
@@ -343,7 +425,8 @@ export default function AgentDetailsPage() {
               <button
                 type="button"
                 onClick={handleDelete}
-                className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-200 transition hover:bg-rose-400/15 sm:w-auto"
+                disabled={deleteLoading}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-200 transition hover:bg-rose-400/15 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
               >
                 <Trash2 size={16} />
                 {deleteLoading ? "Удаление..." : "Удалить"}
@@ -379,10 +462,68 @@ export default function AgentDetailsPage() {
         </GlassCard>
       </div>
 
+      <GlassCard className="p-5 sm:p-6">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h2 className="text-xl font-semibold text-white">Экспорт по агенту</h2>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-white/55">
+              Экспорт логов, задач и аналитики в контексте этой машины. Формат выбирается в отдельном overlay.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-3">
+            <PrimaryButton onClick={() => setExportOverlayOpen(true)} disabled={exportBusy !== null} className="min-w-[170px]">
+              {exportBusy ? "Подготовка..." : "Экспорт логов"}
+            </PrimaryButton>
+          </div>
+        </div>
+        {exportMessage ? (
+          <div className="mt-4 rounded-2xl border border-accent/15 bg-accent/[0.08] px-4 py-3 text-sm text-white/70">{exportMessage}</div>
+        ) : null}
+      </GlassCard>
+
       {error ? (
         <GlassCard className="border border-rose-400/20 bg-rose-400/10 p-5 text-sm text-rose-100/90">{error}</GlassCard>
       ) : null}
-      <TerminalPanel agent={agent} commands={commands} />
+      <TerminalPanel agent={effectiveAgent} commands={commands} status={status} />
+
+      {exportOverlayOpen ? (
+        <div className="fixed inset-0 z-40 overflow-y-auto bg-[#02070bcc]/80 p-3 backdrop-blur-sm sm:p-4">
+          <div className="flex min-h-full items-center justify-center py-3">
+            <div className="w-full max-w-md rounded-[1.8rem] border border-white/10 bg-[#101821]/95 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.45)] sm:p-6">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h3 className="text-xl font-semibold text-white">Экспорт логов</h3>
+                  <p className="mt-2 text-sm leading-6 text-white/55">
+                    Выбери формат выгрузки для агента <span className="text-white">{agent.name}</span>.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setExportOverlayOpen(false)}
+                  className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-2 text-sm text-white/65 transition hover:text-white"
+                >
+                  Закрыть
+                </button>
+              </div>
+
+              <div className="mt-5 space-y-3">
+                {(["Json", "Csv", "Pdf"] as const).map((format) => (
+                  <button
+                    key={format}
+                    type="button"
+                    onClick={() => void handleExport(format)}
+                    disabled={exportBusy !== null}
+                    className="flex w-full items-center justify-between rounded-[1.35rem] border border-white/10 bg-white/[0.03] px-4 py-4 text-left text-white/80 transition hover:border-accent/25 hover:bg-accent/[0.08] disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <span className="text-base font-medium text-white">{format}</span>
+                    <span className="text-sm text-white/45">{exportBusy === format ? "Подготовка..." : "Скачать"}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {showLinuxReconnectHelp ? (
         <div className="fixed inset-0 z-40 overflow-y-auto bg-[#02070bcc]/80 p-3 backdrop-blur-sm sm:p-4">
@@ -538,6 +679,9 @@ export default function AgentDetailsPage() {
               <div className="mt-6 flex flex-col gap-3 sm:flex-row">
                 <a
                   href={reconnectUrl}
+                  onClick={() => {
+                    markAgentLaunched(agent.id, inferLocalAgentPlatform());
+                  }}
                   className="inline-flex items-center justify-center rounded-2xl border border-accent/25 bg-accent/12 px-4 py-2 text-sm font-medium text-accent transition hover:bg-accent/20"
                 >
                   Открыть ссылку ещё раз

@@ -5,6 +5,7 @@ import { FolderKanban, Plus, Search, TerminalSquare, Trash2 } from "lucide-react
 import { SelectFieldUI } from "@/components/select-field-ui";
 import { GlassCard, PrimaryButton, SectionTitle } from "@/components/ui";
 import { apiJson } from "@/lib/api-client";
+import { deleteCommandOverride, mergeCommandOverrides, saveCommandOverride } from "@/lib/command-overrides";
 import { loadAllCommands } from "@/lib/commands";
 import type {
   CommandDto,
@@ -77,22 +78,13 @@ export function CommandsStudio() {
   const [scenarioQuery, setScenarioQuery] = useState("");
   const [scenarioPlatform, setScenarioPlatform] = useState<ScenarioPlatform>("all");
   const [scenarioSteps, setScenarioSteps] = useState<ScenarioStep[]>([]);
+  const [deletingCommandId, setDeletingCommandId] = useState<string | null>(null);
 
   const loadCommands = async () => {
     setLoading(true);
 
     try {
-      const data = await apiJson<PagedResult<CommandDto>>("/api/hackaton/command?take=100&skip=0", { method: "GET" }, "Не удалось загрузить команды.");
-      setCommands(await loadAllCommands("Не удалось загрузить команды."));
-
-      /* if (data.totalCount > items.length) {
-        const fullData = await apiJson<PagedResult<CommandDto>>(
-          `/api/hackaton/command?take=${Math.max(COMMANDS_FETCH_LIMIT, data.totalCount)}&skip=0`,
-          { method: "GET" },
-          "РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РєРѕРјР°РЅРґС‹.",
-        );
-        setCommands(fullData.items ?? items);
-      } */
+      setCommands(mergeCommandOverrides(await loadAllCommands("Не удалось загрузить команды.")));
     } catch {
       setCommands([]);
     } finally {
@@ -282,6 +274,40 @@ export function CommandsStudio() {
     setMessage(null);
   };
 
+  const handleDeleteCommand = async (commandId: string) => {
+    const command = commands.find((item) => item.id === commandId);
+    if (!command || command.isSystem) {
+      return;
+    }
+
+    if (!window.confirm(`Удалить команду "${command.name}"?`)) {
+      return;
+    }
+
+    setDeletingCommandId(commandId);
+    setSaving(true);
+    setError(null);
+    setMessage(null);
+
+    try {
+      await apiJson<void>(`/api/hackaton/command/${commandId}`, { method: "DELETE" }, "Не удалось удалить команду.");
+      deleteCommandOverride(commandId);
+      setCommands((current) => current.filter((item) => item.id !== commandId));
+
+      if (selectedId === commandId || draft.id === commandId) {
+        openNewCommand();
+      }
+
+      setMessage("Команда удалена.");
+      await loadCommands();
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Не удалось удалить команду.");
+    } finally {
+      setDeletingCommandId(null);
+      setSaving(false);
+    }
+  };
+
   const saveCommand = async () => {
     setSaving(true);
     setError(null);
@@ -320,6 +346,13 @@ export function CommandsStudio() {
           "Не удалось обновить команду.",
         );
 
+        saveCommandOverride(draft.id, {
+          description: draft.description,
+          bashScript,
+          powerShellScript,
+          logRegex: null,
+        });
+
         await syncPlaceholders(draft.id, loadedPlaceholders, normalizedPlaceholders);
 
         setMessage("Команда обновлена.");
@@ -337,6 +370,13 @@ export function CommandsStudio() {
           },
           "Не удалось создать команду.",
         );
+
+        saveCommandOverride(createdId, {
+          description: draft.description,
+          bashScript,
+          powerShellScript,
+          logRegex: null,
+        });
 
         await syncPlaceholders(createdId, [], normalizedPlaceholders);
 
@@ -360,21 +400,7 @@ export function CommandsStudio() {
 
   const deleteCommand = async () => {
     if (!draft.id) return;
-
-    setSaving(true);
-    setError(null);
-    setMessage(null);
-
-    try {
-      await apiJson<void>(`/api/hackaton/command/${draft.id}`, { method: "DELETE" }, "Не удалось удалить команду.");
-      setMessage("Команда удалена.");
-      openNewCommand();
-      await loadCommands();
-    } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : "Не удалось удалить команду.");
-    } finally {
-      setSaving(false);
-    }
+    await handleDeleteCommand(draft.id);
   };
 
   const addPlaceholderRow = () => {
@@ -952,30 +978,48 @@ export function CommandsStudio() {
                   Загрузка команд...
                 </div>
               ) : filteredCommands.map((item) => (
-                <button
+                <div
                   key={item.id}
-                  type="button"
-                  onClick={() => openCommand(item.id)}
                   className={cn(
-                    "block w-full rounded-[1.2rem] border px-3.5 py-3 text-left transition",
+                    "rounded-[1.2rem] border p-2 transition",
                     selectedId === item.id
                       ? "border-line bg-white/8"
                       : "border-white/8 bg-white/5 hover:border-line hover:bg-white/[0.07]",
                   )}
                 >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="truncate font-medium text-white">{item.name}</div>
-                      <div className="mt-0.5 text-xs text-accent">{item.isSystem ? "Системная" : "Пользовательская"}</div>
-                    </div>
-                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-accent/12 text-accent">
-                      <TerminalSquare size={16} />
-                    </div>
+                  <div className="flex items-start gap-2">
+                    <button
+                      type="button"
+                      onClick={() => openCommand(item.id)}
+                      className="block min-w-0 flex-1 rounded-[0.9rem] px-1.5 py-1 text-left"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="truncate font-medium text-white">{item.name}</div>
+                          <div className="mt-0.5 text-xs text-accent">{item.isSystem ? "Системная" : "Пользовательская"}</div>
+                        </div>
+                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-accent/12 text-accent">
+                          <TerminalSquare size={16} />
+                        </div>
+                      </div>
+                      <p className="mt-2 line-clamp-2 text-sm leading-5 text-white/55">
+                        {item.description || "Описание не задано."}
+                      </p>
+                    </button>
+
+                    {!item.isSystem ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteCommand(item.id)}
+                        disabled={saving && deletingCommandId === item.id}
+                        aria-label={`Удалить команду ${item.name}`}
+                        className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-rose-400/20 bg-rose-400/10 text-rose-200 transition hover:bg-rose-400/15 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {saving && deletingCommandId === item.id ? "..." : <Trash2 size={16} />}
+                      </button>
+                    ) : null}
                   </div>
-                  <p className="mt-2 line-clamp-2 text-sm leading-5 text-white/55">
-                    {item.description || "Описание не задано."}
-                  </p>
-                </button>
+                </div>
               ))}
             </div>
           </GlassCard>
@@ -1098,7 +1142,8 @@ export function CommandsStudio() {
                       <button
                         type="button"
                         onClick={deleteCommand}
-                        className="inline-flex w-full items-center justify-center rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-2 text-sm font-medium text-rose-200 transition hover:bg-rose-400/15 sm:w-auto"
+                        disabled={saving}
+                        className="inline-flex w-full items-center justify-center rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-2 text-sm font-medium text-rose-200 transition hover:bg-rose-400/15 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
                       >
                         Удалить
                       </button>
@@ -1150,7 +1195,7 @@ export function CommandsStudio() {
                       subtitle="Пример шаблонной команды."
                     />
                     <div className="rounded-2xl border border-white/8 bg-white/5 px-4 py-4 text-sm leading-6 text-white/55">
-                      Пример: команда <span className="font-mono text-[#9af7c8]">ssh $1 "systemctl restart $2"</span> и плейсхолдеры
+                      Пример: команда <span className="font-mono text-[#9af7c8]">ssh $1 &quot;systemctl restart $2&quot;</span> и плейсхолдеры
                       <span className="font-mono text-white"> host</span> и <span className="font-mono text-white"> service</span>.
                     </div>
                   </div>

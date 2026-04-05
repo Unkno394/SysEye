@@ -46,17 +46,43 @@ function normalizeExecutionStatus(status?: string | null): TaskStatus {
   }
 }
 
-function buildExecutionSummary(execution: TaskExecutionDto) {
+export function isExecutionTerminalStatus(status?: string | null) {
+  const normalizedStatus = normalizeExecutionStatus(status);
+  return normalizedStatus === "success"
+    || normalizedStatus === "error"
+    || normalizedStatus === "cancelled"
+    || normalizedStatus === "interrupted";
+}
+
+export function buildExecutionSummary(execution: TaskExecutionDto) {
   const summary = String(execution.resultSummary ?? "").trim();
-  if (summary) {
+  if (summary && summary !== "-") {
     return summary;
+  }
+
+  const errorLine = String(execution.rawError ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+
+  const outputLine = String(execution.rawOutput ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+
+  if (errorLine) {
+    return errorLine;
+  }
+
+  if (outputLine) {
+    return outputLine;
   }
 
   switch (normalizeExecutionStatus(execution.status)) {
     case "success":
-      return "Проверка завершилась успешно.";
+      return "Команда завершилась успешно без дополнительного вывода.";
     case "error":
-      return "Проверка завершилась с ошибкой.";
+      return "Команда завершилась с ошибкой.";
     case "cancelled":
       return "Выполнение отменено.";
     case "interrupted":
@@ -93,5 +119,29 @@ export function mapExecutionToHistoryItem(
     rawOutput: execution.rawOutput,
     rawError: execution.rawError,
     kind: "command",
+  };
+}
+
+export function createOptimisticExecution(params: {
+  id: string;
+  agentId: string;
+  commandId: string;
+  title: string;
+}): TaskExecutionDto {
+  const now = new Date().toISOString();
+
+  return {
+    id: params.id,
+    agentId: params.agentId,
+    commandId: params.commandId,
+    title: params.title,
+    startedAt: now,
+    status: "queued",
+    completedAt: null,
+    durationSeconds: null,
+    exitCode: null,
+    resultSummary: "Команда поставлена в очередь. Ожидаем запуск на агенте.",
+    rawOutput: "",
+    rawError: "",
   };
 }

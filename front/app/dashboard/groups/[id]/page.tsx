@@ -12,16 +12,18 @@ import { getAgentGroup, subscribeToAgentGroups, type AgentGroup } from "@/lib/ag
 import type { AgentDto, CommandDto, PagedResult } from "@/lib/backend-types";
 import { getAgentStatus, getDistributionLabel, getRelativeHeartbeatLabel } from "@/lib/backend-types";
 import { useClientRealtime } from "@/lib/client-realtime";
+import { applyEffectiveAgentMetadata, getEffectiveAgentStatus, useLocalAgentLaunches } from "@/lib/local-agent-runtime";
 
 export default function AgentGroupDetailsPage() {
   const params = useParams<{ id: string }>();
-  const groupId = params.id;
+  const groupId = params?.id ?? "";
 
   const [group, setGroup] = useState<AgentGroup | null>(null);
   const [agents, setAgents] = useState<AgentDto[]>([]);
   const [commands, setCommands] = useState<CommandDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const localLaunches = useLocalAgentLaunches();
 
   const loadGroup = () => {
     setGroup(getAgentGroup(groupId));
@@ -108,12 +110,15 @@ export default function AgentGroupDetailsPage() {
     if (!group) return [];
 
     const agentMap = new Map(agents.map((agent) => [agent.id, agent]));
-    return group.agentIds.map((agentId) => agentMap.get(agentId)).filter((agent): agent is AgentDto => Boolean(agent));
-  }, [agents, group]);
+    return group.agentIds
+      .map((agentId) => agentMap.get(agentId))
+      .map((agent) => (agent ? applyEffectiveAgentMetadata(agent, localLaunches) : null))
+      .filter((agent): agent is AgentDto => Boolean(agent));
+  }, [agents, group, localLaunches]);
 
   const onlineCount = useMemo(
-    () => selectedAgents.filter((agent) => getAgentStatus(agent.lastHeartbeatAt) === "online").length,
-    [selectedAgents],
+    () => selectedAgents.filter((agent) => getEffectiveAgentStatus(agent, localLaunches) === "online").length,
+    [localLaunches, selectedAgents],
   );
 
   const latestHeartbeat = useMemo(() => {
@@ -167,7 +172,7 @@ export default function AgentGroupDetailsPage() {
                   key={agent.id}
                   className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-xs text-white/65"
                 >
-                  <StatusBadge status={getAgentStatus(agent.lastHeartbeatAt)} />
+                  <StatusBadge status={getEffectiveAgentStatus(agent, localLaunches)} />
                   <span>{agent.name}</span>
                 </span>
               ))}
@@ -219,7 +224,7 @@ export default function AgentGroupDetailsPage() {
                       {[getDistributionLabel(agent.distribution, agent.os), agent.ipAddress || null].filter(Boolean).join(" · ") || "Параметры машины появятся после подключения."}
                     </div>
                   </div>
-                  <StatusBadge status={getAgentStatus(agent.lastHeartbeatAt)} />
+                  <StatusBadge status={getEffectiveAgentStatus(agent, localLaunches)} />
                 </div>
               </div>
             ))}

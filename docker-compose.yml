@@ -123,9 +123,13 @@ services:
     build:
       context: ./front
       dockerfile: Dockerfile
-    restart: unless-stopped
+    env_file:
+      - ./front/.env
     environment:
-      HACKATON_API_BASE_URL: http://backend:80
+      HACKATON_API_BASE_URL: http://backend
+      NEXT_PUBLIC_HACKATON_API_BASE_URL: http://127.0.0.1:5000
+      NEXT_PUBLIC_AGENT_SERVER_URL: http://localhost:5000
+    restart: unless-stopped
     ports:
       - "3001:3000"
     depends_on:

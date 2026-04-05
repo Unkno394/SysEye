@@ -1,5 +1,6 @@
 ﻿using Application.DTO;
 using Application.Interfaces;
+using Infrastructure.Dto;
 using Microsoft.AspNetCore.SignalR;
 using Web.Hubs;
 
@@ -22,4 +23,8 @@ public class RealtimeNotifier(IHubContext<ClientHub> hubContext) : IRealtimeNoti
     public Task NotifyTaskUpdatedAsync(Guid userId, Guid agentId, AgentTaskDto task, CancellationToken cancellationToken = default)
         => hubContext.Clients.Group(ClientHub.GetUserGroup(userId.ToString()))
             .SendAsync("TaskUpdated", new { agentId, task }, cancellationToken);
+
+    public Task NotifyExecutionLogAsync(Guid executionId, AgentLogDto log, CancellationToken cancellationToken = default)
+        => hubContext.Clients.Group(ClientHub.GetExecutionGroup(executionId))
+            .SendAsync("ExecutionLogReceived", log, cancellationToken);
 }

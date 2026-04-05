@@ -2,6 +2,7 @@
 
 import { apiJson } from "@/lib/api-client";
 import type { CommandDto, PagedResult } from "@/lib/backend-types";
+import { mergeCommandOverrides } from "@/lib/command-overrides";
 
 const COMMANDS_PAGE_SIZE = 100;
 
@@ -16,7 +17,7 @@ export async function loadAllCommands(fallback = "Не удалось загру
   const totalCount = firstPage.totalCount ?? items.length;
 
   if (totalCount <= items.length) {
-    return items;
+    return mergeCommandOverrides(items);
   }
 
   const pages: Promise<PagedResult<CommandDto>>[] = [];
@@ -32,5 +33,5 @@ export async function loadAllCommands(fallback = "Не удалось загру
   }
 
   const restPages = await Promise.all(pages);
-  return [items, ...restPages.map((page) => page.items ?? [])].flat();
+  return mergeCommandOverrides([items, ...restPages.map((page) => page.items ?? [])].flat());
 }

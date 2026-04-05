@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AuthShell } from "@/components/auth-shell";
 import { EmailConfirmationPanel } from "@/components/email-confirmation-panel";
+import { PasswordRecoveryPanel } from "@/components/password-recovery-panel";
 import { getReadableApiError } from "@/lib/api-error";
 import { saveSessionProfile } from "@/lib/session-profile";
 
@@ -17,6 +18,7 @@ export default function LoginPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingConfirmationEmail, setPendingConfirmationEmail] = useState<string | null>(null);
+  const [recoveryOpen, setRecoveryOpen] = useState(false);
 
   const resendConfirmation = async () => {
     const response = await fetch("/api/hackaton/emailconfirm", {
@@ -128,6 +130,19 @@ export default function LoginPage() {
         >
           {submitting ? "Вход..." : "Перейти в панель"}
         </button>
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => {
+              setRecoveryOpen((current) => !current);
+              setError(null);
+              setMessage(null);
+            }}
+            className="text-sm text-accent transition hover:text-white"
+          >
+            {recoveryOpen ? "Скрыть восстановление" : "Забыли пароль?"}
+          </button>
+        </div>
       </form>
 
       {error ? (
@@ -145,6 +160,18 @@ export default function LoginPage() {
             onSuccess={() => {
               router.push("/dashboard");
               router.refresh();
+            }}
+          />
+        ) : recoveryOpen ? (
+          <PasswordRecoveryPanel
+            suggestedEmail={email}
+            onClose={() => setRecoveryOpen(false)}
+            onSuccess={(recoveredEmail) => {
+              setEmail(recoveredEmail);
+              setPassword("");
+              setRecoveryOpen(false);
+              setError(null);
+              setMessage("Пароль обновлён. Теперь можно войти с новым паролем.");
             }}
           />
         ) : (

@@ -1,18 +1,23 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CalendarRange, Play, TerminalSquare, Users } from "lucide-react";
 import { apiJson } from "@/lib/api-client";
-import type { AgentDto, CommandDto, PagedResult, ScenarioDetailsDto, ScenarioDto, TaskExecutionDto, TaskStatus } from "@/lib/backend-types";
+import type { AgentDto, AgentTaskDto, CommandDto, ExecutionLogDto, PagedResult, ScenarioDetailsDto, ScenarioDto, TaskExecutionDto, TaskStatus } from "@/lib/backend-types";
 import { getAgentStatus, getOsLabel, getRelativeHeartbeatLabel } from "@/lib/backend-types";
 import { useClientRealtime } from "@/lib/client-realtime";
-import { extractPlaceholderTokens, getPlaceholderIndex, mapExecutionToHistoryItem } from "@/lib/execution-history";
+import { buildExecutionSummary, createOptimisticExecution, extractPlaceholderTokens, getPlaceholderIndex, isExecutionTerminalStatus, mapExecutionToHistoryItem } from "@/lib/execution-history";
+import { joinExecutionLogMessages, matchesExecutionLogRegex, mergeExecutionLogs } from "@/lib/execution-logs";
+import { ensureServerAgentOs } from "@/lib/local-agent-runtime";
 import { GlassCard, SectionTitle, StatusBadge } from "@/components/ui";
+
+const OPTIMISTIC_TASK_TTL_MS = 2 * 60 * 1000;
 
 type GroupTask = {
   id: string;
   agentId: string;
   agentName: string;
+  commandId: string;
   title: string;
   status: TaskStatus;
   createdAt: string;
@@ -20,6 +25,8 @@ type GroupTask = {
   durationSeconds?: number | null;
   exitCode?: number | null;
   summary: string;
+  rawOutput?: string;
+  rawError?: string;
   kind: "command" | "scenario";
 };
 
@@ -53,6 +60,35 @@ function formatDuration(value?: number | null) {
   if (value < 1) return `${value.toFixed(2)} сек`;
   if (value < 10) return `${value.toFixed(1)} сек`;
   return `${Math.round(value)} сек`;
+}
+
+function shouldShowExitCode(task: GroupTask) {
+  if (task.exitCode == null) return false;
+  if (task.exitCode !== 0) return true;
+  return task.status !== "success";
+}
+
+function canCancelTask(task: GroupTask) {
+  return task.status === "queued" || task.status === "running";
+}
+
+function buildTaskLog(task: GroupTask) {
+  const stdout = String(task.rawOutput ?? "").trim();
+  const stderr = String(task.rawError ?? "").trim();
+
+  if (!stdout && !stderr) {
+    return "";
+  }
+
+  if (stdout && stderr) {
+    return [`stdout:\n${stdout}`, `stderr:\n${stderr}`].join("\n\n");
+  }
+
+  if (stderr) {
+    return `stderr:\n${stderr}`;
+  }
+
+  return stdout;
 }
 
 function resolveCommandForAgent(item: CommandDto, agent: AgentDto) {
@@ -103,6 +139,22 @@ function matchesCommandPlatform(command: CommandDto, filter: CommandPlatformFilt
   if (filter === "linux") return hasBash;
   return hasPowerShell;
 }
+
+function normalizeExecutionIds(value: unknown) {
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    return normalized ? [normalized] : [];
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === "string" ? item.trim() : ""))
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
 function buildBatchNotice(base: string, successCount: number, totalCount: number): ActionNotice {
   if (successCount <= 0) {
     return {
@@ -142,6 +194,144 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
   const [scenarioQuery, setScenarioQuery] = useState("");
   const [scenarioFilter, setScenarioFilter] = useState<ScenarioFilter>("all");
   const [actionNotice, setActionNotice] = useState<ActionNotice>(null);
+  const [expandedTaskIds, setExpandedTaskIds] = useState<string[]>([]);
+  const [executionLogsByTaskId, setExecutionLogsByTaskId] = useState<Record<string, ExecutionLogDto[]>>({});
+  const [regexLogsByTaskId, setRegexLogsByTaskId] = useState<Record<string, ExecutionLogDto[]>>({});
+  const [loadingLogsTaskIds, setLoadingLogsTaskIds] = useState<string[]>([]);
+  const optimisticTaskDeadlinesRef = useRef<Record<string, number>>({});
+  const commandsById = useMemo(() => new Map(commands.map((command) => [command.id, command])), [commands]);
+  const onlineAgents = useMemo(
+    () => agents.filter((agent) => getAgentStatus(agent.lastHeartbeatAt) === "online"),
+    [agents],
+  );
+
+  const scheduleTasksReload = () => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.setTimeout(() => {
+      void loadTasks();
+    }, 1_200);
+    window.setTimeout(() => {
+      void loadTasks();
+    }, 4_000);
+  };
+
+  const pushOptimisticTask = (agent: AgentDto, executionId: string, commandId: string) => {
+    const normalizedExecutionId = executionId.trim();
+    if (!normalizedExecutionId) {
+      return;
+    }
+
+    const title = commandsById.get(commandId)?.name?.trim() || `Команда ${commandId.slice(0, 8)}`;
+    const task = {
+      ...mapExecutionToHistoryItem(
+        createOptimisticExecution({
+          id: normalizedExecutionId,
+          agentId: agent.id,
+          commandId,
+          title,
+        }),
+        commandsById,
+        agent.name,
+      ),
+      id: `${agent.id}:${normalizedExecutionId}`,
+      agentName: agent.name,
+    };
+    optimisticTaskDeadlinesRef.current = {
+      ...optimisticTaskDeadlinesRef.current,
+      [task.id]: Date.now() + OPTIMISTIC_TASK_TTL_MS,
+    };
+
+    setServerTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
+  };
+
+  const mergeLoadedTasks = (loadedTasks: GroupTask[], successfulAgentIds: Set<string>) => {
+    const now = Date.now();
+    const optimisticTaskDeadlines = optimisticTaskDeadlinesRef.current;
+    const loadedTaskIds = new Set(loadedTasks.map((task) => task.id));
+    const trackedAgentIds = new Set(agents.map((agent) => agent.id));
+
+    setServerTasks((current) => {
+      const preservedTasks = current.filter((task) => {
+        if (!trackedAgentIds.has(task.agentId)) {
+          return false;
+        }
+
+        if (loadedTaskIds.has(task.id)) {
+          return false;
+        }
+
+        const optimisticDeadline = optimisticTaskDeadlines[task.id];
+        if (optimisticDeadline && optimisticDeadline > now) {
+          return true;
+        }
+
+        return !successfulAgentIds.has(task.agentId);
+      });
+
+      return [...loadedTasks, ...preservedTasks];
+    });
+
+    optimisticTaskDeadlinesRef.current = Object.fromEntries(
+      Object.entries(optimisticTaskDeadlines).filter(([taskId, optimisticDeadline]) => (
+        optimisticDeadline > now && !loadedTaskIds.has(taskId)
+      )),
+    );
+  };
+
+  const patchTaskFromRealtime = (agentId: string, task: AgentTaskDto) => {
+    const executionId = String(task.id ?? "").trim();
+    if (!executionId) {
+      return;
+    }
+
+    const taskId = `${agentId}:${executionId}`;
+
+    setServerTasks((current) => {
+      const currentTask = current.find((item) => item.id === taskId);
+      if (!currentTask) {
+        return current;
+      }
+
+      const nextStatus = task.status ?? currentTask.status;
+      const currentIsTerminal = isExecutionTerminalStatus(currentTask.status);
+      const nextIsTerminal = isExecutionTerminalStatus(nextStatus);
+      if (currentIsTerminal && !nextIsTerminal) {
+        return current;
+      }
+
+      const nextTask: GroupTask = {
+        ...currentTask,
+        title: String(task.title ?? "").trim() || currentTask.title,
+        status: nextStatus,
+        completedAt: nextIsTerminal
+          ? currentTask.completedAt ?? new Date().toISOString()
+          : null,
+        exitCode: task.exitCode ?? currentTask.exitCode ?? null,
+        rawOutput: task.output ?? currentTask.rawOutput ?? "",
+        rawError: task.error ?? currentTask.rawError ?? "",
+      };
+
+      nextTask.summary = buildExecutionSummary({
+        id: executionId,
+        agentId,
+        commandId: currentTask.commandId,
+        title: nextTask.title,
+        startedAt: currentTask.createdAt,
+        status: nextTask.status,
+        completedAt: nextTask.completedAt,
+        durationSeconds: nextTask.durationSeconds,
+        exitCode: nextTask.exitCode,
+        resultSummary: "",
+        rawOutput: nextTask.rawOutput,
+        rawError: nextTask.rawError,
+      });
+
+      return [nextTask, ...current.filter((item) => item.id !== taskId)];
+    });
+  };
 
   const loadTasks = async () => {
     if (!agents.length) {
@@ -158,7 +348,9 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
             { method: "GET" },
           );
 
-          return (executions.items ?? []).map((execution) => ({
+          return {
+            agentId: agent.id,
+            tasks: (executions.items ?? []).map((execution) => ({
             ...mapExecutionToHistoryItem(
               execution,
               commandsById,
@@ -166,14 +358,20 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
             ),
             id: `${agent.id}:${execution.id}`,
             agentName: agent.name,
-          }));
+            })),
+          };
         } catch {
-          return [];
+          return {
+            agentId: agent.id,
+            tasks: null,
+          };
         }
       }),
     );
 
-    setServerTasks(taskGroups.flat());
+    const successfulAgentIds = new Set(taskGroups.filter((group) => Array.isArray(group.tasks)).map((group) => group.agentId));
+    const loadedTasks = taskGroups.flatMap((group) => group.tasks ?? []);
+    mergeLoadedTasks(loadedTasks, successfulAgentIds);
   };
 
   const loadScenarios = async () => {
@@ -226,22 +424,59 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
 
   const trackedAgentIds = useMemo(() => new Set(agents.map((agent) => agent.id)), [agents]);
 
-  useClientRealtime({
-    onTaskQueued: ({ agentId }) => {
-      if (trackedAgentIds.has(agentId)) {
-        void loadTasks();
-      }
-    },
-    onTaskUpdated: ({ agentId }) => {
-      if (trackedAgentIds.has(agentId)) {
-        void loadTasks();
-      }
-    },
-  }, agents.length > 0);
-
   const tasks = useMemo(() => {
     return [...serverTasks].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
   }, [serverTasks]);
+  const taskIdByExecutionId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const task of tasks) {
+      const executionId = task.id.includes(":") ? task.id.split(":")[1] : task.id;
+      map.set(executionId, task.id);
+    }
+    return map;
+  }, [tasks]);
+  const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
+  const expandedExecutionIds = useMemo(
+    () => expandedTaskIds.map((taskId) => (taskId.includes(":") ? taskId.split(":")[1] : taskId)).filter(Boolean),
+    [expandedTaskIds],
+  );
+
+  useClientRealtime({
+    onTaskQueued: ({ agentId, task }) => {
+      if (trackedAgentIds.has(agentId)) {
+        patchTaskFromRealtime(agentId, task);
+        void loadTasks();
+      }
+    },
+    onTaskUpdated: ({ agentId, task }) => {
+      if (trackedAgentIds.has(agentId)) {
+        patchTaskFromRealtime(agentId, task);
+        void loadTasks();
+      }
+    },
+    onExecutionLogReceived: (entry) => {
+      const executionId = String(entry.executionId ?? "").trim();
+      const taskId = taskIdByExecutionId.get(executionId);
+      if (!executionId || !taskId) {
+        return;
+      }
+
+      setExecutionLogsByTaskId((current) => ({
+        ...current,
+        [taskId]: mergeExecutionLogs(current[taskId] ?? [], [entry]),
+      }));
+
+      const task = taskById.get(taskId);
+      const command = task ? commandsById.get(task.commandId) : null;
+      if (command?.logRegex?.trim() && matchesExecutionLogRegex(entry.message, command.logRegex)) {
+        setRegexLogsByTaskId((current) => ({
+          ...current,
+          [taskId]: mergeExecutionLogs(current[taskId] ?? [], [entry]),
+        }));
+      }
+    },
+    executionIds: expandedExecutionIds,
+  }, agents.length > 0);
 
   const visibleCommands = useMemo(() => {
     const normalizedQuery = commandQuery.trim().toLowerCase();
@@ -296,8 +531,6 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
     });
   }, [selectedDate, statusFilter, tasks]);
 
-  const onlineAgents = useMemo(() => agents.filter((agent) => getAgentStatus(agent.lastHeartbeatAt) === "online").length, [agents]);
-
   const latestHeartbeat = useMemo(() => {
     const timestamps = agents
       .map((agent) => new Date(agent.lastHeartbeatAt).getTime())
@@ -313,19 +546,33 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
   const runBatch = async (requests: Promise<unknown>[], label: string) => {
     const results = await Promise.allSettled(requests);
     const successCount = results.filter((result) => result.status === "fulfilled").length;
+    const firstError = results.find((result) => result.status === "rejected");
 
-    setActionNotice(buildBatchNotice(label, successCount, requests.length));
-    await loadTasks();
+    if (!successCount && firstError?.status === "rejected") {
+      const reason = firstError.reason;
+      setActionNotice({
+        tone: "error",
+        text: reason instanceof Error ? reason.message : `${label} не удалось выполнить.`,
+      });
+    } else {
+      setActionNotice(buildBatchNotice(label, successCount, requests.length));
+    }
+
+    if (successCount > 0) {
+      scheduleTasksReload();
+    }
 
     return successCount > 0;
   };
 
   const queueCommandTask = async (item: CommandDto) => {
-    const supportedAgents = agents.filter((agent) => getCommandAvailability(item, agent).runnable);
+    const supportedAgents = onlineAgents.filter((agent) => getCommandAvailability(item, agent).runnable);
     if (!supportedAgents.length) {
       setActionNotice({
         tone: "error",
-        text: `Команда "${item.name}" недоступна для выбранной группы.`,
+        text: onlineAgents.length
+          ? `Команда "${item.name}" недоступна для online машин группы.`
+          : "В группе нет online машин. Дождись реального heartbeat, потом запускай команды.",
       });
       return;
     }
@@ -334,43 +581,82 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
       supportedAgents.map((agent) => {
         const command = getCommandAvailability(item, agent).resolvedCommand;
 
-        return apiJson<unknown>(
-          `/api/hackaton/task/agents/${agent.id}/execute`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              commandId: item.id,
-              placeholderValues: {},
-            }),
-          },
-        );
+        return (async () => {
+          await ensureServerAgentOs(agent);
+          const response = await apiJson<unknown>(
+            `/api/hackaton/task/agents/${agent.id}/execute`,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                commandId: item.id,
+                placeholderValues: {},
+              }),
+            },
+          );
+          normalizeExecutionIds(response).forEach((executionId) => {
+            pushOptimisticTask(agent, executionId, item.id);
+          });
+          return response;
+        })();
       }),
       "Запуск",
     );
   };
 
   const executeTemplateCommand = async (commandId: string, values: Record<number, string>) => {
+    const command = commandsById.get(commandId);
+    const supportedAgents = command
+      ? onlineAgents.filter((agent) => getCommandAvailability(command, agent).runnable)
+      : [];
+
+    if (!supportedAgents.length) {
+      setActionNotice({
+        tone: "error",
+        text: onlineAgents.length
+          ? "Шаблонная команда недоступна для online машин группы."
+          : "В группе нет online машин. Дождись реального heartbeat, потом запускай команды.",
+      });
+      return;
+    }
+
     await runBatch(
-      agents.map((agent) =>
-        apiJson<unknown>(
-          `/api/hackaton/task/agents/${agent.id}/execute`,
-          {
-            method: "POST",
-            body: JSON.stringify({
-              commandId,
-              placeholderValues: values,
-            }),
-          },
-        ),
+      supportedAgents.map((agent) =>
+        (async () => {
+          await ensureServerAgentOs(agent);
+          const response = await apiJson<unknown>(
+            `/api/hackaton/task/agents/${agent.id}/execute`,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                commandId,
+                placeholderValues: values,
+              }),
+            },
+          );
+          normalizeExecutionIds(response).forEach((executionId) => {
+            pushOptimisticTask(agent, executionId, commandId);
+          });
+          return response;
+        })(),
       ),
       "Шаблонный запуск",
     );
   };
 
   const handleCommandClick = (item: CommandDto) => {
+    if (!onlineAgents.length) {
+      setActionNotice({
+        tone: "error",
+        text: "В группе нет online машин. Команды сейчас не отправляются.",
+      });
+      return;
+    }
+
     const tokens = Array.from(
       new Set(
-        agents.flatMap((agent) => extractPlaceholderTokens(resolveCommandForAgent(item, agent))),
+        onlineAgents
+          .filter((agent) => getCommandAvailability(item, agent).runnable)
+          .flatMap((agent) => extractPlaceholderTokens(resolveCommandForAgent(item, agent))),
       ),
     ).sort((left, right) => getPlaceholderIndex(left) - getPlaceholderIndex(right));
 
@@ -414,10 +700,188 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
   };
 
   const handleScenarioClick = (scenarioId: string) => {
-    setActionNotice({
-      tone: "error",
-      text: "Новый backend пока не запускает сценарии по группе напрямую. Сценарии можно редактировать, но не отправлять на машины одним кликом.",
-    });
+    void (async () => {
+      const scenario = loadedScenarios.find((item) => item.id === scenarioId);
+      if (!scenario) {
+        setActionNotice({ tone: "error", text: "Сценарий не найден." });
+        return;
+      }
+
+      const supportedAgents = onlineAgents.filter((agent) =>
+        (scenario.commands ?? []).some((step) => {
+          const command = commandsById.get(step.commandId);
+          if (!command) return false;
+          const availability = getCommandAvailability(command, agent);
+          return availability.runnable && extractPlaceholderTokens(availability.resolvedCommand).length === 0;
+        }),
+      );
+
+      if (!supportedAgents.length) {
+        setActionNotice({
+          tone: "error",
+          text: onlineAgents.length
+            ? `В сценарии "${scenario.name}" нет шагов, которые можно сразу отправить на online машины.`
+            : "В группе нет online машин. Сценарий не стартует без реального heartbeat.",
+        });
+        return;
+      }
+
+      const requests = supportedAgents.map(async (agent) => {
+        await ensureServerAgentOs(agent);
+        const response = await apiJson<unknown>(
+          `/api/hackaton/task/agents/${agent.id}/scenario`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              scenarioId,
+            }),
+          },
+        );
+
+        const queuedCommands = (scenario.commands ?? [])
+          .map((step) => commandsById.get(step.commandId))
+          .filter((command): command is CommandDto => Boolean(command));
+
+        normalizeExecutionIds(response).forEach((executionId, index) => {
+          const command = queuedCommands[index];
+          if (command) {
+            pushOptimisticTask(agent, executionId, command.id);
+          }
+        });
+      });
+
+      await runBatch(requests, `Сценарий "${scenario.name}"`);
+    })();
+  };
+
+  const loadExecutionLogs = async (task: GroupTask) => {
+    if (loadingLogsTaskIds.includes(task.id)) {
+      return;
+    }
+
+    const executionId = task.id.includes(":") ? task.id.split(":")[1] : task.id;
+    setLoadingLogsTaskIds((current) => [...current, task.id]);
+
+    try {
+      const logs = await apiJson<ExecutionLogDto[]>(
+        `/api/hackaton/logs/executions/${executionId}?limit=200`,
+        { method: "GET" },
+        "Не удалось загрузить лог выполнения.",
+      );
+
+      setExecutionLogsByTaskId((current) => ({
+        ...current,
+        [task.id]: mergeExecutionLogs(current[task.id] ?? [], logs ?? []),
+      }));
+
+      const command = commandsById.get(task.commandId);
+      if (command?.logRegex?.trim()) {
+        try {
+          const regexLogs = await apiJson<ExecutionLogDto[]>(
+            `/api/hackaton/logs/executions/${executionId}/regex?limit=200`,
+            { method: "GET" },
+            "Не удалось загрузить regex-логи.",
+          );
+
+          setRegexLogsByTaskId((current) => ({
+            ...current,
+            [task.id]: mergeExecutionLogs(current[task.id] ?? [], regexLogs ?? []),
+          }));
+        } catch {
+          setRegexLogsByTaskId((current) => ({
+            ...current,
+            [task.id]: [],
+          }));
+        }
+      }
+    } catch {
+      setExecutionLogsByTaskId((current) => ({
+        ...current,
+        [task.id]: [],
+      }));
+    } finally {
+      setLoadingLogsTaskIds((current) => current.filter((item) => item !== task.id));
+    }
+  };
+
+  const toggleTaskLogs = (task: GroupTask) => {
+    const isExpanded = expandedTaskIds.includes(task.id);
+
+    setExpandedTaskIds((current) =>
+      isExpanded ? current.filter((item) => item !== task.id) : [...current, task.id],
+    );
+
+    if (!isExpanded && executionLogsByTaskId[task.id] === undefined) {
+      void loadExecutionLogs(task);
+    }
+  };
+
+  const buildHttpLog = (task: GroupTask) => {
+    const logs = executionLogsByTaskId[task.id] ?? [];
+    if (!logs.length) {
+      return "";
+    }
+
+    return joinExecutionLogMessages(logs);
+  };
+
+  const buildRegexLog = (task: GroupTask) => {
+    const logs = regexLogsByTaskId[task.id] ?? [];
+    if (!logs.length) {
+      return "";
+    }
+
+    return joinExecutionLogMessages(logs);
+  };
+
+  const cancelTask = async (task: GroupTask) => {
+    const executionId = task.id.includes(":") ? task.id.split(":")[1] : task.id;
+
+    try {
+      await apiJson<void>(
+        `/api/hackaton/task/executions/${executionId}/cancel`,
+        { method: "POST" },
+        "Не удалось прервать выполнение.",
+      );
+
+      delete optimisticTaskDeadlinesRef.current[task.id];
+      setServerTasks((current) => current.map((item) => {
+        if (item.id !== task.id) {
+          return item;
+        }
+
+        const nextTask: GroupTask = {
+          ...item,
+          status: "cancelled",
+          completedAt: item.completedAt ?? new Date().toISOString(),
+          rawError: item.rawError || "command cancelled by user",
+        };
+
+        nextTask.summary = buildExecutionSummary({
+          id: executionId,
+          agentId: item.agentId,
+          commandId: item.commandId,
+          title: item.title,
+          startedAt: item.createdAt,
+          status: nextTask.status,
+          completedAt: nextTask.completedAt,
+          durationSeconds: nextTask.durationSeconds,
+          exitCode: nextTask.exitCode,
+          resultSummary: "",
+          rawOutput: nextTask.rawOutput,
+          rawError: nextTask.rawError,
+        });
+
+        return nextTask;
+      }));
+      setActionNotice({ tone: "success", text: `Команда "${task.title}" отменена на агенте ${task.agentName}.` });
+      void loadTasks();
+    } catch (error) {
+      setActionNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Не удалось прервать выполнение.",
+      });
+    }
   };
 
   const handleSubmitPlaceholderCommand = () => {
@@ -453,7 +917,7 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
           action={
             <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-xs uppercase tracking-[0.18em] text-white/60">
               <Users size={14} />
-              <span>{onlineAgents}/{agents.length} online</span>
+              <span>{onlineAgents.length}/{agents.length} online</span>
             </div>
           }
         />
@@ -510,17 +974,19 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
 
             <div className="terminal-scroll mt-3 flex gap-3 overflow-x-auto pb-1">
               {visibleCommands.map((item) => {
-                const supportedAgents = agents.filter((agent) => getCommandAvailability(item, agent).runnable);
+                const supportedAgents = onlineAgents.filter((agent) => getCommandAvailability(item, agent).runnable);
                 const supportedAgentsCount = supportedAgents.length;
                 const isRunnable = supportedAgentsCount > 0;
                 const hasPlaceholders = supportedAgents.some((agent) => extractPlaceholderTokens(getCommandAvailability(item, agent).resolvedCommand).length > 0);
-                const statusText = isRunnable
-                  ? supportedAgentsCount === agents.length
-                    ? hasPlaceholders
-                      ? "Откроется один ввод параметров для всей группы"
-                      : "Готова к запуску"
-                    : `Доступно для ${supportedAgentsCount} из ${agents.length}`
-                  : "Недоступно для группы";
+                const statusText = !onlineAgents.length
+                  ? "В группе нет online машин"
+                  : isRunnable
+                    ? supportedAgentsCount === onlineAgents.length
+                      ? hasPlaceholders
+                        ? "Откроется один ввод параметров для всех online машин"
+                        : "Готова к запуску на всех online машинах"
+                      : `Доступно для ${supportedAgentsCount} из ${onlineAgents.length} online`
+                    : "Недоступно для online машин группы";
 
                 return (
                   <button
@@ -548,7 +1014,7 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
                       <span className="text-xs text-white/40">{statusText}</span>
                       <span className={`inline-flex items-center gap-1 text-xs ${isRunnable ? "text-accent" : "text-white/30"}`}>
                         <Play size={12} />
-                        {isRunnable ? "Запустить на группе" : "Недоступно"}
+                        {isRunnable ? "Запустить на группе" : onlineAgents.length ? "Недоступно" : "Оффлайн"}
                       </span>
                     </div>
                   </button>
@@ -597,33 +1063,50 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
             </div>
 
             <div className="terminal-scroll mt-3 flex gap-3 overflow-x-auto pb-1">
-              {visibleScenarios.map((scenario) => (
-                <button
-                  key={scenario.id}
-                  type="button"
-                  onClick={() => handleScenarioClick(scenario.id)}
-                  className="w-[280px] shrink-0 rounded-2xl border border-white/8 bg-black/20 p-3 text-left transition hover:border-amber-400/20 hover:bg-white/[0.04] sm:w-[300px]"
-                >
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="break-words font-medium text-white">{scenario.name}</div>
-                    <span className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-white/40">
-                      {scenario.isSystem ? "system" : "custom"}
-                    </span>
-                  </div>
-                  <div className="mt-2 text-xs text-white/50">{scenario.description}</div>
-                  <div className="mt-3 rounded-xl border border-white/8 bg-[#041016] px-3 py-2 text-xs text-white/55">
-                    {(scenario.commands ?? []).map((command, index) => (
-                      <div key={`${scenario.id}-${command.commandId}`} className="truncate">
-                        {index + 1}. {command.commandName}
-                      </div>
-                    ))}
-                  </div>
-                  <div className="mt-3 inline-flex items-center gap-1 text-xs text-amber-200">
-                    <Play size={12} />
-                    Пока без запуска
-                  </div>
-                </button>
-              ))}
+              {visibleScenarios.map((scenario) => {
+                const runnableAgentsCount = onlineAgents.filter((agent) =>
+                  (scenario.commands ?? []).some((step) => {
+                    const command = commandsById.get(step.commandId);
+                    if (!command) return false;
+                    const availability = getCommandAvailability(command, agent);
+                    return availability.runnable && extractPlaceholderTokens(availability.resolvedCommand).length === 0;
+                  }),
+                ).length;
+                const isRunnable = runnableAgentsCount > 0;
+
+                return (
+                  <button
+                    key={scenario.id}
+                    type="button"
+                    disabled={!isRunnable}
+                    onClick={() => handleScenarioClick(scenario.id)}
+                    className={`w-[280px] shrink-0 rounded-2xl border p-3 text-left transition sm:w-[300px] ${
+                      isRunnable
+                        ? "border-white/8 bg-black/20 hover:border-amber-400/20 hover:bg-white/[0.04]"
+                        : "cursor-not-allowed border-amber-500/20 bg-amber-500/5 opacity-75"
+                    }`}
+                  >
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="break-words font-medium text-white">{scenario.name}</div>
+                      <span className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-white/40">
+                        {scenario.isSystem ? "system" : "custom"}
+                      </span>
+                    </div>
+                    <div className="mt-2 text-xs text-white/50">{scenario.description}</div>
+                    <div className="mt-3 rounded-xl border border-white/8 bg-[#041016] px-3 py-2 text-xs text-white/55">
+                      {(scenario.commands ?? []).map((command, index) => (
+                        <div key={`${scenario.id}-${command.commandId}`} className="truncate">
+                          {index + 1}. {command.commandName}
+                        </div>
+                      ))}
+                    </div>
+                    <div className={`mt-3 inline-flex items-center gap-1 text-xs ${isRunnable ? "text-amber-200" : "text-white/30"}`}>
+                      <Play size={12} />
+                      {isRunnable ? `Запустить сценарий на ${runnableAgentsCount}` : onlineAgents.length ? "Недоступно" : "Нет online машин"}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
 
             {!visibleScenarios.length ? (
@@ -671,18 +1154,66 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
                             {formatDuration(task.durationSeconds)}
                           </span>
                         ) : null}
-                        {task.exitCode != null ? (
+                        {shouldShowExitCode(task) ? (
                           <span className="rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-white/45">
-                            exit {task.exitCode}
+                            код {task.exitCode}
                           </span>
                         ) : null}
                       </div>
                     </div>
-                    <StatusBadge status={task.status} />
+                    <div className="flex flex-col items-start gap-2 sm:items-end">
+                      <StatusBadge status={task.status} />
+                      {canCancelTask(task) ? (
+                        <button
+                          type="button"
+                          onClick={() => void cancelTask(task)}
+                          className="rounded-xl border border-rose-400/20 bg-rose-400/10 px-3 py-2 text-xs text-rose-100/90 transition hover:bg-rose-400/15"
+                        >
+                          Прервать
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
                   <div className="mt-3 rounded-2xl border border-white/8 bg-[#081018] p-3 text-sm text-white/80 break-words whitespace-pre-wrap">
                     {task.summary}
                   </div>
+                  {buildTaskLog(task) || executionLogsByTaskId[task.id] !== undefined || commandsById.get(task.commandId)?.logRegex ? (
+                    <div className="mt-3">
+                      <button
+                        type="button"
+                        onClick={() => toggleTaskLogs(task)}
+                        className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-white/65 transition hover:text-white"
+                      >
+                        {expandedTaskIds.includes(task.id) ? "Скрыть лог" : "Развернуть лог"}
+                      </button>
+                      {expandedTaskIds.includes(task.id) ? (
+                        <div className="mt-3 space-y-3">
+                          {loadingLogsTaskIds.includes(task.id) ? (
+                            <div className="rounded-2xl border border-white/8 bg-black/25 p-3 text-xs text-white/55">
+                              Загрузка логов...
+                            </div>
+                          ) : null}
+                          {buildHttpLog(task) ? (
+                            <div className="rounded-2xl border border-white/8 bg-black/25 p-3 font-mono text-xs text-[#9af7c8] break-words whitespace-pre-wrap">
+                              {buildHttpLog(task)}
+                            </div>
+                          ) : buildTaskLog(task) ? (
+                            <div className="rounded-2xl border border-white/8 bg-black/25 p-3 font-mono text-xs text-[#9af7c8] break-words whitespace-pre-wrap">
+                              {buildTaskLog(task)}
+                            </div>
+                          ) : null}
+                          {buildRegexLog(task) ? (
+                            <div className="rounded-2xl border border-amber-400/20 bg-amber-400/10 p-3">
+                              <div className="mb-2 text-[10px] uppercase tracking-[0.18em] text-amber-200/80">Regex matches</div>
+                              <div className="font-mono text-xs text-amber-100 break-words whitespace-pre-wrap">
+                                {buildRegexLog(task)}
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               ))}
 

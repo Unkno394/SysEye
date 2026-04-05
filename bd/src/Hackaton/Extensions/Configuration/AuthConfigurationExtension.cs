@@ -1,5 +1,8 @@
-﻿using Infrastructure.Options;
+﻿using Infrastructure.DbContexts;
+using Infrastructure.Options;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using System.Text;
@@ -22,6 +25,33 @@ public static class AuthConfigurationExtension
                     {
                         context.Token = context.Request.Cookies[options.AccessCookieName];
                         return Task.CompletedTask;
+                    },
+                    OnTokenValidated = async context =>
+                    {
+                        var userIdValue = context.Principal?.FindFirst(options.UserIdCookieName)?.Value;
+                        var sessionIdValue = context.Principal?.FindFirst(options.SessionCookieName)?.Value;
+
+                        if (!Guid.TryParse(userIdValue, out var userId) || !Guid.TryParse(sessionIdValue, out var sessionId))
+                        {
+                            context.Fail("Требуется авторизация");
+                            return;
+                        }
+
+                        var dbContext = context.HttpContext.RequestServices.GetRequiredService<AppDbContext>();
+                        var isSessionValid = await dbContext.UserSessions
+                            .AsNoTracking()
+                            .AnyAsync(
+                                session => session.Id == sessionId
+                                           && session.UserId == userId
+                                           && session.IsActive
+                                           && !session.User.IsDeleted
+                                           && !session.User.IsBanned,
+                                context.HttpContext.RequestAborted);
+
+                        if (!isSessionValid)
+                        {
+                            context.Fail("Сессия больше не активна");
+                        }
                     }
                 };
 
