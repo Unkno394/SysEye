@@ -14,7 +14,7 @@
 		<PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="8.0.0" />
 		<PackageReference Include="Microsoft.AspNetCore.SignalR.Common" Version="8.0.0" />
 		<PackageReference Include="Microsoft.AspNetCore.SignalR.Protocols.Json" Version="8.0.0" />
-		<PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.11">
+		<PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.24">
 			<IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
 			<PrivateAssets>all</PrivateAssets>
 		</PackageReference>
@@ -46,12 +46,6 @@
 			<Generator>ResXFileCodeGenerator</Generator>
 			<LastGenOutput>Resources.Designer.cs</LastGenOutput>
 		</EmbeddedResource>
-	</ItemGroup>
-
-	<ItemGroup>
-		<Content Include="DatabaseSeeds\**\*.sql">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-		</Content>
 	</ItemGroup>
 
 </Project>

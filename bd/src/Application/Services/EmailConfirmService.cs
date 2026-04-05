@@ -4,7 +4,6 @@ using Infrastructure.DbContexts;
 using Infrastructure.Interfaces;
 using Infrastructure.Options;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
 namespace Application.Services
@@ -15,8 +14,7 @@ namespace Application.Services
         IEmailTemplateBuilder emailTemplateBuilder,
         IVerificationTokenProvider tokenProvider,
         IEmailService emailService,
-        AppDbContext context,
-        ILogger<EmailConfirmService> logger) : IEmailConfirmService
+        AppDbContext context) : IEmailConfirmService
     {
         private readonly VerificationOptions _options = options.Value;
 
@@ -37,7 +35,6 @@ namespace Application.Services
 
             var token = tokenProvider.GenerateResetToken(_options.EmailTokenLength);
             await redisCacheService.SetAsync(user.Email, token);
-            logger.LogWarning("Email confirmation token for {Email}: {Token}", user.Email, token);
 
             var html = emailTemplateBuilder.BuildEmailConfirmation(token, _options.EmailTokenExpirationMinutes);
 

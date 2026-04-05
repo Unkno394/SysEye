@@ -1,4 +1,4 @@
-using Application.DTO;
+using Application.DTO.ApiKey;
 
 namespace Application.Interfaces;
 

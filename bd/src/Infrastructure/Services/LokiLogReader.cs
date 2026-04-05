@@ -7,7 +7,7 @@ using Infrastructure.Interfaces;
 
 namespace Infrastructure.Services;
 
-public sealed class LokiLogReader : ILokiLogReader
+public class LokiLogReader : ILokiLogReader
 {
     private readonly HttpClient _httpClient;
 
@@ -60,6 +60,89 @@ public sealed class LokiLogReader : ILokiLogReader
         }
 
         return logs.Where(x => re.IsMatch(x.Message)).ToArray();
+    }
+
+    public async Task<IReadOnlyCollection<AgentLogDto>> GetByAgentForExportAsync(
+    string agentId,
+    DateTimeOffset fromUtc,
+    DateTimeOffset toUtc,
+    int limit = 100_000,
+    CancellationToken ct = default)
+    {
+        var query = "{service_name=\"agent-signalr-gateway\"} " +
+            $"| agent_id=\"{EscapeLogQlValue(agentId)}\"";
+
+        return await QueryForExportAsync(query, fromUtc, toUtc, limit, ct);
+    }
+
+    private async Task<IReadOnlyCollection<AgentLogDto>> QueryForExportAsync(
+        string query,
+        DateTimeOffset fromUtc,
+        DateTimeOffset toUtc,
+        int limit,
+        CancellationToken ct)
+    {
+        var url = "/loki/api/v1/query_range" +
+            $"?query={Uri.EscapeDataString(query)}" +
+            $"&start={ToUnixNanoString(fromUtc)}" +
+            $"&end={ToUnixNanoString(toUtc)}" +
+            $"&limit={limit}" +
+            $"&direction=forward";
+
+        using var response = await _httpClient.GetAsync(url, ct);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+
+        var result = new List<AgentLogDto>();
+
+        if (!document.RootElement.TryGetProperty("data", out var data) ||
+            !data.TryGetProperty("result", out var results))
+        {
+            return result;
+        }
+
+        foreach (var streamItem in results.EnumerateArray())
+        {
+            Guid? executionId = null;
+            Guid? commandId = null;
+            string? category = null;
+            string? level = null;
+
+            if (streamItem.TryGetProperty("stream", out var streamProps))
+            {
+                executionId = TryGetGuid(streamProps, "execution_id");
+                commandId = TryGetGuid(streamProps, "command_id");
+                category = TryGetString(streamProps, "log_category");
+                level = TryGetString(streamProps, "detected_level")
+                        ?? TryGetString(streamProps, "severity_text");
+            }
+
+            if (!streamItem.TryGetProperty("values", out var values))
+                continue;
+
+            foreach (var value in values.EnumerateArray())
+            {
+                if (value.GetArrayLength() < 2)
+                    continue;
+
+                var nanoTs = value[0].GetString() ?? "0";
+                var message = value[1].GetString() ?? string.Empty;
+
+                result.Add(new AgentLogDto
+                {
+                    Timestamp = FromUnixNanoString(nanoTs),
+                    Message = message,
+                    Level = level,
+                    ExecutionId = executionId,
+                    CommandId = commandId,
+                    Category = category
+                });
+            }
+        }
+
+        return result;
     }
 
     private async Task<IReadOnlyCollection<AgentLogDto>> QueryAsync(

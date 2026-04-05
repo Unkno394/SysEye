@@ -1,5 +1,6 @@
 using Application.Interfaces;
 using Infrastructure.Services;
+using QuestPDF.Infrastructure;
 using Web.Extensions;
 using Web.Extensions.Configuration;
 using Web.Hubs;
@@ -15,7 +16,6 @@ public class Program
         var builder = WebApplication.CreateBuilder(args);
         builder.Configuration.AddEnvironmentVariables();
         builder.Configuration.AddKeyPerFile("/run/secrets", optional: true, reloadOnChange: true);
-        AddLocalSecrets(builder);
         builder.AddOptions();
         builder.ValidateOptions();
 
@@ -48,6 +48,7 @@ public class Program
         builder.Host.UseCustomLogging();
         builder.AddClaimsPrincipalExtension();
         builder.Services.AddCoreAdmin(builder.Environment.IsDevelopment() ? string.Empty : "Admin");
+        QuestPDF.Settings.License = LicenseType.Community;
 
         builder.Services.AddCors(options =>
         {
@@ -81,7 +82,6 @@ public class Program
         app.UseWebSockets(webSocketOptions);
 
         app.UseMiddleware<ExceptionHandlingMiddleware>();
-        app.UseMiddleware<ApiKeyMiddleware>();
 
         app.UseAuthentication();
         app.UseAuthorization();
@@ -94,10 +94,7 @@ public class Program
             app.UseSwaggerUI();
         }
 
-        if (!app.Environment.IsDevelopment())
-        {
-            app.UseHttpsRedirection();
-        }
+        app.UseHttpsRedirection();
         app.UseStaticFiles();
         app.MapControllers();
         app.MapDefaultControllerRoute();
@@ -108,46 +105,5 @@ public class Program
         app.ApplyMigrations();
 
         app.Run();
-    }
-
-    private static void AddLocalSecrets(WebApplicationBuilder builder)
-    {
-        var localSecretsPath = Path.GetFullPath(Path.Combine(
-            builder.Environment.ContentRootPath,
-            "..",
-            "..",
-            "hackaton",
-            "secrets"));
-
-        if (!Directory.Exists(localSecretsPath))
-        {
-            return;
-        }
-
-        var fileToKey = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["db_password.txt"] = "DB_PASSWORD",
-            ["redis_password.txt"] = "REDIS_PASSWORD",
-            ["jwt_secret.txt"] = "JWT_SECRET",
-            ["email.txt"] = "EMAIL",
-            ["email_password.txt"] = "EMAIL_PASSWORD"
-        };
-
-        var secrets = fileToKey
-            .Select(pair => new
-            {
-                Key = pair.Value,
-                FilePath = Path.Combine(localSecretsPath, pair.Key)
-            })
-            .Where(item => File.Exists(item.FilePath))
-            .ToDictionary(
-                item => item.Key,
-                item => File.ReadAllText(item.FilePath).Trim(),
-                StringComparer.OrdinalIgnoreCase);
-
-        if (secrets.Count > 0)
-        {
-            builder.Configuration.AddInMemoryCollection(secrets);
-        }
     }
 }

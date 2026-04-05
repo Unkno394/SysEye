@@ -14,10 +14,7 @@ public class UserService(AppDbContext context) : IUserService
             .Where(u => u.Id == userId)
             .Select(u => new UserInfo
             {
-                Id = u.Id,
                 Name = u.Name,
-                Login = u.Login,
-                Email = u.Email,
                 Role = u.Role,
                 IsEmailConfirmed = u.IsEmailConfirmed
             })

@@ -62,29 +62,22 @@ public class JwtProvider : IJwtProvider
         var tokenHandler = new JwtSecurityTokenHandler();
         var key = Encoding.UTF8.GetBytes(_options.Secret);
 
-        try
+        var principal = tokenHandler.ValidateToken(token, new TokenValidationParameters
         {
-            var principal = tokenHandler.ValidateToken(token, new TokenValidationParameters
-            {
-                ValidateIssuer = true,
-                ValidIssuer = _options.Issuer,
-                ValidateAudience = true,
-                ValidAudience = _options.Audience,
-                ValidateLifetime = true,
-                IssuerSigningKey = new SymmetricSecurityKey(key),
-                ClockSkew = TimeSpan.Zero
-            }, out _);
+            ValidateIssuer = true,
+            ValidIssuer = _options.Issuer,
+            ValidateAudience = true,
+            ValidAudience = _options.Audience,
+            ValidateLifetime = true,
+            IssuerSigningKey = new SymmetricSecurityKey(key),
+            ClockSkew = TimeSpan.Zero
+        }, out _);
 
-            if (!principal.HasClaim(c => c.Type == _options.UserIdCookieName) ||
-                !principal.HasClaim(c => c.Type == _options.SessionCookieName))
-                return null;
-
-            return principal;
-        }
-        catch
-        {
+        if (!principal.HasClaim(c => c.Type == _options.UserIdCookieName) ||
+            !principal.HasClaim(c => c.Type == _options.SessionCookieName))
             return null;
-        }
+
+        return principal;
     }
 
     public string GeneratePasswordResetToken(string email)

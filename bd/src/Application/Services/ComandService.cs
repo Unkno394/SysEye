@@ -1,4 +1,5 @@
 ﻿using Application.DTO;
+using Application.DTO.Command;
 using Application.Interfaces;
 using Domain.Exceptions;
 using Domain.Models;
@@ -11,15 +12,16 @@ public class CommandService(AppDbContext context) : ICommandService
 {
     private static readonly Func<AppDbContext, Guid, Guid, IQueryable<Command>> _getCommandQuery
         = (context, commandId, userId) => context.Commands
-        .Where(c => c.Id == commandId && !c.IsDeleted && (c.UserId == userId || c.IsSystem));
+        .Where(c => c.Id == commandId && c.UserId == userId && !c.IsDeleted);
 
     #region Commands
     public async Task<Command> CreateAsync(
         Guid userId,
-        string name,
-        string description,
-        string bashScript,
-        string powerShellScript,
+        string? name,
+        string? description,
+        string? bashScript,
+        string? powerShellScript,
+        string? tag,
         CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(name))
@@ -31,7 +33,8 @@ public class CommandService(AppDbContext context) : ICommandService
             Description = description ?? string.Empty,
             BashScript = bashScript ?? string.Empty,
             PowerShellScript = powerShellScript ?? string.Empty,
-            UserId = userId
+            UserId = userId,
+            Tag = tag ?? string.Empty,
         };
 
         context.Commands.Add(command);
@@ -43,11 +46,10 @@ public class CommandService(AppDbContext context) : ICommandService
     public async Task<PagedResult<CommandDto>> GetUserCommandsAsync(Guid userId, int take, int skip, CancellationToken ct)
     {
         var query = context.Commands.AsNoTracking()
-            .Where(c => !c.IsDeleted && (c.UserId == userId || c.IsSystem));
+            .Where(c => c.UserId == userId || c.IsSystem);
 
-        var commands = await query
-            .OrderByDescending(c => c.IsSystem)
-            .ThenBy(c => c.Name)
+        var commands = await query.OrderByDescending(c => c.Tag)
+            .ThenByDescending(c => c.Name)
             .Skip(skip)
             .Take(take)
             .Select(c => new CommandDto
@@ -55,10 +57,8 @@ public class CommandService(AppDbContext context) : ICommandService
                 Id = c.Id,
                 IsSystem = c.IsSystem,
                 Name = c.Name,
-                Description = c.Description,
-                BashScript = c.BashScript,
-                PowerShellScript = c.PowerShellScript,
                 LogRegex = c.LogRegex,
+                Tag = c.Tag,
             })
             .ToListAsync(ct);
 
@@ -81,6 +81,7 @@ public class CommandService(AppDbContext context) : ICommandService
         string? bashScript,
         string? powerShellScript,
         string? logRegex,
+        string? tag,
         CancellationToken ct)
     {
         var command = await _getCommandQuery(context, commandId, userId)
@@ -91,17 +92,20 @@ public class CommandService(AppDbContext context) : ICommandService
         if (!string.IsNullOrWhiteSpace(name))
             command.Name = name.Trim();
 
-        if (description != null)
+        if (!string.IsNullOrWhiteSpace(description))
             command.Description = description;
 
-        if (bashScript != null)
+        if (!string.IsNullOrWhiteSpace(bashScript))
             command.BashScript = bashScript;
 
-        if (powerShellScript != null)
+        if (!string.IsNullOrWhiteSpace(powerShellScript))
             command.PowerShellScript = powerShellScript;
 
-        if (logRegex != null)
+        if (!string.IsNullOrWhiteSpace(logRegex))
             command.LogRegex = logRegex;
+
+        if (!string.IsNullOrWhiteSpace(tag))
+            command.Tag = tag;
 
         await context.SaveChangesAsync(ct);
         return true;
@@ -111,11 +115,9 @@ public class CommandService(AppDbContext context) : ICommandService
     {
         var command = await _getCommandQuery(context, commandId, userId)
             .Where(c => !c.IsSystem)
-            .FirstOrDefaultAsync(ct);
-        if (command == null) throw new NotFoundException("Команда не существует");
+            .ExecuteUpdateAsync(setter => setter.SetProperty(
+                property => property.IsDeleted, true));
 
-        command.IsDeleted = true;
-        await context.SaveChangesAsync(ct);
         return true;
     }
     #endregion

@@ -1,0 +1,68 @@
+﻿using Application.DTO.ApiKey;
+using Application.Interfaces;
+using Domain.Exceptions;
+using Domain.Models;
+using Infrastructure.DbContexts;
+using Infrastructure.Interfaces;
+using Microsoft.EntityFrameworkCore;
+
+namespace Application.Services;
+
+public class ApiKeyService(AppDbContext context,
+    IVerificationTokenProvider verificationTokenProvider) : IApiKeyService
+{
+    public async Task<ApiKeyDto> Generate(Guid agentId, int daysToRevoke, CancellationToken ct)
+    {
+        var key = new ApiKey
+        {
+            AgentId = agentId,
+            RevokedAt = DateTime.UtcNow.AddDays(daysToRevoke),
+            Value = verificationTokenProvider.GenerateApiKey()
+        };
+
+        await context.ApiKeys.AddAsync(key, ct);
+        await context.SaveChangesAsync();
+
+        return new ApiKeyDto
+        {
+            Id = key.Id,
+            Value = key.Value,
+        };
+    }
+
+    public async Task<bool> Validate(string apiKey, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(apiKey)) return false;
+
+        var key = await context.ApiKeys.AsNoTracking()
+            .Where(a => a.Value == apiKey
+                && a.RevokedAt > DateTime.UtcNow)
+            .FirstOrDefaultAsync(ct);
+
+        if (key == null) return false;
+        return true;
+    }
+
+    public async Task Revoke(Guid id, Guid agentId, CancellationToken ct)
+    {
+        await context.ApiKeys
+            .Where(a => a.Id == id && a.AgentId == agentId)
+            .ExecuteDeleteAsync(ct);
+    }
+
+    public async Task<ApiKeySmallDto> GetKey(Guid agentId, CancellationToken ct)
+    {
+        var key = await context.ApiKeys.AsNoTracking()
+            .Where(a => a.AgentId == agentId)
+            .Select(a => new ApiKeySmallDto
+            {
+                Id = a.Id,
+                RevokedAt = a.RevokedAt,
+            })
+            .FirstOrDefaultAsync(ct);
+
+        if (key == null) throw new NotFoundException("API ключ не найден");
+
+        return key;
+    }
+}

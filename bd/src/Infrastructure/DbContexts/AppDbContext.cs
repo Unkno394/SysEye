@@ -13,7 +13,6 @@ public partial class AppDbContext : DbContext
     public DbSet<Token> UserTokens { get; set; }
     public DbSet<ApiKey> ApiKeys { get; set; }
     public DbSet<Agent> Agents { get; set; }
-    public DbSet<AgentTask> AgentTasks { get; set; }
     public DbSet<Command> Commands { get; set; }
     public DbSet<CommandPlaceholder> CommandPlaceholders { get; set; }
     public DbSet<Scenario> Scenarios { get; set; }

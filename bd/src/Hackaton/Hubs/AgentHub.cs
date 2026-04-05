@@ -1,22 +1,19 @@
-﻿using System.Text.Json;
-using Application.DTO;
-using Application.Interfaces;
+﻿using Application.Interfaces;
 using Infrastructure.DbContexts;
 using Infrastructure.Dto;
 using Infrastructure.Interfaces;
 using Infrastructure.Options;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Web.Contracts;
 
 namespace Web.Hubs;
 
 public class AgentHub(
+    AppDbContext context,
     IApiKeyService apiKeyService,
-    ITaskService taskService,
     IOptions<ApiKeyOptions> options,
-    AppDbContext dbContext,
     IAgentOtlpSender agentOtlpSender,
     IHubContext<ClientHub> clientHubContext,
     ILogger<AgentHub> logger) : Hub
@@ -50,10 +47,12 @@ public class AgentHub(
                 return;
             }
 
-            if (!TryGetRequiredValue(httpContext, options.Value.ApiKeyHeader, "apiKey", out var apiKey))
+            var headers = httpContext.Request.Headers;
+
+            if (!TryGetRequiredHeader(headers, options.Value.ApiKeyHeader, out var apiKey))
             {
                 logger.LogWarning(
-                    "Не найден API-ключ '{HeaderName}'. ConnectionId: {ConnectionId}",
+                    "Не найден заголовок API-ключа '{HeaderName}'. ConnectionId: {ConnectionId}",
                     options.Value.ApiKeyHeader,
                     Context.ConnectionId);
 
@@ -61,10 +60,10 @@ public class AgentHub(
                 return;
             }
 
-            if (!TryGetRequiredValue(httpContext, options.Value.AgentIdHeader, "agentId", out var agentId))
+            if (!TryGetRequiredHeader(headers, options.Value.AgentIdHeader, out var agentId))
             {
                 logger.LogWarning(
-                    "Не найден AgentId '{HeaderName}'. ConnectionId: {ConnectionId}",
+                    "Не найден заголовок AgentId '{HeaderName}'. ConnectionId: {ConnectionId}",
                     options.Value.AgentIdHeader,
                     Context.ConnectionId);
 
@@ -150,103 +149,16 @@ public class AgentHub(
         if (string.IsNullOrWhiteSpace(agentId))
             return;
 
-        try
-        {
-            await agentOtlpSender.SendAsync(agentId, agentLogDto);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(
-                ex,
-                "Не удалось отправить лог агента {AgentId} в Loki. Продолжаю без внешнего лог-стрима.",
-                agentId);
-        }
+        await agentOtlpSender.SendAsync(agentId, agentLogDto);
 
-        if (agentLogDto.ExecutionId.HasValue)
-        {
-            await clientHubContext.Clients
-                .Group(ClientHub.GetExecutionGroup(agentLogDto.ExecutionId.Value))
-                .SendAsync("ExecutionLogReceived", agentLogDto);
-        }
-    }
-
-    public async Task Heartbeat(Dictionary<string, object>? payload)
-    {
-        var agentId = GetCurrentAgentId();
-        if (!Guid.TryParse(agentId, out var parsedAgentId))
-            return;
-
-        var agent = await dbContext.Agents.FirstOrDefaultAsync(
-            x => x.Id == parsedAgentId && !x.IsDeleted,
-            Context.ConnectionAborted);
-
-        if (agent is null)
-            return;
-
-        if (TryGetString(payload, "ipAddress", out var ipAddress) && !string.IsNullOrWhiteSpace(ipAddress))
-        {
-            agent.IpAddress = ipAddress.Trim();
-        }
-
-        if (TryGetInt(payload, "port", out var port))
-        {
-            agent.Port = port;
-        }
-
-        if (TryGetString(payload, "distribution", out var distribution) && !string.IsNullOrWhiteSpace(distribution))
-        {
-            agent.Distribution = distribution.Trim();
-        }
-
-        agent.LastHeartbeatAt = DateTime.UtcNow;
-        await dbContext.SaveChangesAsync(Context.ConnectionAborted);
-
-        var dto = new AgentDto
-        {
-            Id = agent.Id,
-            Name = agent.Name,
-            Os = agent.Os,
-            IpAddress = agent.IpAddress,
-            Port = agent.Port,
-            Distribution = agent.Distribution,
-            LastHeartbeatAt = agent.LastHeartbeatAt,
-        };
+        await context.TaskExecutions.Where(t => t.Id == agentLogDto.ExecutionId)
+            .ExecuteUpdateAsync(setter => setter
+                .SetProperty(p => p.DurationSeconds, agentLogDto.DurationSeconds)
+                .SetProperty(p => p.IsSuccess, agentLogDto.Level != "error"));
 
         await clientHubContext.Clients
-            .Group(ClientHub.GetUserGroup(agent.UserId.ToString()))
-            .SendAsync("AgentUpdated", dto, Context.ConnectionAborted);
-    }
-
-    public async Task SendTaskOutput(string taskId, string chunk)
-    {
-        if (string.IsNullOrWhiteSpace(chunk))
-            return;
-
-        var userId = await GetCurrentUserIdAsync();
-        if (userId == Guid.Empty || !Guid.TryParse(taskId, out var executionId))
-            return;
-
-        await taskService.AppendOutputAsync(
-            executionId,
-            userId,
-            chunk,
-            Context.ConnectionAborted);
-    }
-
-    public async Task CompleteTask(string taskId, string status, string stdout, string stderr, int? exitCode)
-    {
-        var userId = await GetCurrentUserIdAsync();
-        if (userId == Guid.Empty || !Guid.TryParse(taskId, out var executionId))
-            return;
-
-        await taskService.CompleteTaskAsync(
-            executionId,
-            userId,
-            status,
-            stdout,
-            stderr,
-            exitCode,
-            Context.ConnectionAborted);
+            .Group(ClientHub.GetExecutionGroup(agentLogDto.ExecutionId.Value))
+            .SendAsync("ExecutionLogReceived", agentLogDto);
     }
 
     private async Task RejectConnection(string message)
@@ -255,61 +167,18 @@ public class AgentHub(
         Context.Abort();
     }
 
-    private static bool TryGetRequiredValue(
-        HttpContext httpContext,
+    private static bool TryGetRequiredHeader(
+        IHeaderDictionary headers,
         string headerName,
-        string queryName,
         out string value)
     {
         value = string.Empty;
 
-        if (httpContext.Request.Headers.TryGetValue(headerName, out var headerValues))
-        {
-            value = headerValues.ToString();
-            return !string.IsNullOrWhiteSpace(value);
-        }
-
-        if (httpContext.Request.Query.TryGetValue(queryName, out var queryValues))
-        {
-            value = queryValues.ToString();
-            return !string.IsNullOrWhiteSpace(value);
-        }
-
-        return false;
-    }
-
-    private static bool TryGetString(Dictionary<string, object>? payload, string key, out string value)
-    {
-        value = string.Empty;
-
-        if (payload is null || !payload.TryGetValue(key, out var rawValue) || rawValue is null)
+        if (!headers.TryGetValue(headerName, out var headerValues))
             return false;
 
-        value = rawValue switch
-        {
-            string stringValue => stringValue,
-            JsonElement { ValueKind: JsonValueKind.String } jsonValue => jsonValue.GetString() ?? string.Empty,
-            _ => rawValue.ToString() ?? string.Empty,
-        };
-
+        value = headerValues.ToString();
         return !string.IsNullOrWhiteSpace(value);
-    }
-
-    private static bool TryGetInt(Dictionary<string, object>? payload, string key, out int value)
-    {
-        value = 0;
-
-        if (payload is null || !payload.TryGetValue(key, out var rawValue) || rawValue is null)
-            return false;
-
-        return rawValue switch
-        {
-            int intValue => (value = intValue) >= 0,
-            long longValue when longValue is >= int.MinValue and <= int.MaxValue => (value = (int)longValue) >= 0,
-            JsonElement { ValueKind: JsonValueKind.Number } jsonValue when jsonValue.TryGetInt32(out var parsed) => (value = parsed) >= 0,
-            string stringValue when int.TryParse(stringValue, out var parsed) => (value = parsed) >= 0,
-            _ => false,
-        };
     }
 
     private string? GetCurrentAgentId()
@@ -317,18 +186,6 @@ public class AgentHub(
         return Context.Items.TryGetValue(AgentIdItemKey, out var value)
             ? value as string
             : null;
-    }
-
-    private async Task<Guid> GetCurrentUserIdAsync()
-    {
-        var agentId = GetCurrentAgentId();
-        if (!Guid.TryParse(agentId, out var parsedAgentId))
-            return Guid.Empty;
-
-        return await dbContext.Agents.AsNoTracking()
-            .Where(x => x.Id == parsedAgentId && !x.IsDeleted)
-            .Select(x => x.UserId)
-            .FirstOrDefaultAsync(Context.ConnectionAborted);
     }
 
     private static string GetAgentGroupName(string agentId) => $"agent-{agentId}";

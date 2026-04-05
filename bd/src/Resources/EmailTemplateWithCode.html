@@ -8,242 +8,155 @@
         body {
             margin: 0;
             padding: 0;
-            background-color: #eef3f6;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            color: #10202c;
-        }
-
-        table {
-            border-collapse: collapse;
-        }
-
-        .page {
-            width: 100%;
-            background-color: #eef3f6;
-        }
-
-        .shell {
-            width: 100%;
-            max-width: 640px;
-            margin: 0 auto;
-        }
-
-        .card {
-            width: 100%;
-            background-color: #ffffff;
-            border: 1px solid #d9e3ea;
-            border-radius: 24px;
-            overflow: hidden;
-            box-shadow: 0 18px 48px rgba(10, 22, 32, 0.08);
-        }
-
-        .hero {
-            padding: 36px 40px 28px;
-            background:
-                radial-gradient(circle at top right, rgba(88, 255, 179, 0.22), transparent 34%),
-                linear-gradient(180deg, #0c1720 0%, #10202c 100%);
-        }
-
-        .brand {
-            display: inline-block;
-            padding: 8px 14px;
-            border-radius: 999px;
-            background-color: rgba(88, 255, 179, 0.1);
-            border: 1px solid rgba(88, 255, 179, 0.2);
-            color: #58ffb3;
-            font-size: 12px;
-            font-weight: 700;
-            letter-spacing: 0.22em;
-            text-transform: uppercase;
-        }
-
-        .hero-title {
-            margin: 18px 0 0;
-            color: #f7fbff;
-            font-size: 30px;
-            line-height: 1.2;
-            font-weight: 700;
-        }
-
-        .hero-subtitle {
-            margin: 12px 0 0;
-            color: #95a8b5;
-            font-size: 15px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background-color: #f4f7fa;
             line-height: 1.6;
         }
-
-        .content {
-            padding: 32px 40px 18px;
+        
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
         }
-
-        .description {
-            margin: 0 0 24px;
-            color: #324654;
-            font-size: 16px;
-            line-height: 1.7;
-        }
-
-        .code-box {
-            width: 100%;
-            border: 1px solid #dbe5ec;
-            border-radius: 20px;
+        
+        .email-wrapper {
+            background-color: #ffffff;
+            border-radius: 12px;
             overflow: hidden;
-            background-color: #f8fbfc;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
         }
-
-        .code-head {
-            padding: 14px 20px;
-            background-color: #edf4f7;
-            border-bottom: 1px solid #dbe5ec;
-            font-size: 12px;
-            line-height: 1.5;
-            color: #5d7382;
-            text-transform: uppercase;
-            letter-spacing: 0.16em;
-        }
-
-        .code-value-wrap {
-            padding: 28px 20px;
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 40px 30px;
             text-align: center;
         }
-
-        .code-value {
-            display: inline-block;
-            padding: 18px 24px;
-            border-radius: 16px;
-            border: 1px solid rgba(88, 255, 179, 0.26);
-            background-color: #0d1720;
-            color: #58ffb3;
-            font-size: 36px;
-            line-height: 1;
-            font-weight: 800;
-            letter-spacing: 8px;
-            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
-        }
-
-        .meta {
-            margin: 18px 0 0;
-            color: #5d7382;
-            font-size: 14px;
-            line-height: 1.7;
-        }
-
-        .hint {
-            margin: 22px 0 0;
-            padding: 16px 18px;
-            border-radius: 16px;
-            background-color: #f4f8fa;
-            border: 1px solid #dbe5ec;
-            color: #566d7c;
-            font-size: 14px;
-            line-height: 1.7;
-        }
-
-        .footer {
-            padding: 0 40px 32px;
-        }
-
-        .footer-text {
+        
+        .header h1 {
+            color: #ffffff;
             margin: 0;
-            color: #728592;
+            font-size: 28px;
+            font-weight: 600;
+        }
+        
+        .content {
+            padding: 40px 30px;
+        }
+        
+        .description {
+            color: #4a5568;
+            font-size: 16px;
+            margin-bottom: 30px;
+            line-height: 1.6;
+        }
+        
+        .code-container {
+            background-color: #f7fafc;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            margin: 30px 0;
+            border: 1px solid #e2e8f0;
+        }
+        
+        .code {
+            font-size: 32px;
+            font-weight: 700;
+            color: #667eea;
+            letter-spacing: 4px;
+            font-family: 'Courier New', monospace;
+            background-color: #ffffff;
+            display: inline-block;
+            padding: 15px 25px;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+        }
+        
+        .expiry-info {
+            text-align: center;
+            color: #718096;
+            font-size: 14px;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #e2e8f0;
+        }
+        
+        .expiry-time {
+            font-weight: 600;
+            color: #ed8936;
+        }
+        
+        .footer {
+            background-color: #f7fafc;
+            padding: 30px;
+            text-align: center;
+            border-top: 1px solid #e2e8f0;
+        }
+        
+        .footer-text {
+            color: #718096;
             font-size: 12px;
-            line-height: 1.7;
+            margin: 0;
         }
-
-        .preheader {
-            display: none !important;
-            visibility: hidden;
-            opacity: 0;
-            color: transparent;
-            height: 0;
-            width: 0;
-            overflow: hidden;
-            mso-hide: all;
+        
+        .footer-text a {
+            color: #667eea;
+            text-decoration: none;
         }
-
-        @media only screen and (max-width: 560px) {
-            .hero {
-                padding: 28px 22px 22px;
+        
+        @media only screen and (max-width: 480px) {
+            .container {
+                padding: 10px;
             }
-
+            
+            .header {
+                padding: 30px 20px;
+            }
+            
+            .header h1 {
+                font-size: 24px;
+            }
+            
             .content {
-                padding: 24px 22px 16px;
+                padding: 30px 20px;
             }
-
-            .footer {
-                padding: 0 22px 24px;
-            }
-
-            .hero-title {
-                font-size: 26px;
-            }
-
-            .code-value {
-                font-size: 28px;
-                letter-spacing: 5px;
-                padding: 16px 18px;
+            
+            .code {
+                font-size: 24px;
+                padding: 12px 20px;
+                letter-spacing: 2px;
             }
         }
     </style>
 </head>
 <body>
-    <div class="preheader">Код для завершения действия в Шкеты.</div>
-
-    <table role="presentation" class="page" width="100%" cellspacing="0" cellpadding="0" border="0">
-        <tr>
-            <td align="center" style="padding: 24px 12px;">
-                <table role="presentation" class="shell" width="100%" cellspacing="0" cellpadding="0" border="0">
-                    <tr>
-                        <td>
-                            <table role="presentation" class="card" width="100%" cellspacing="0" cellpadding="0" border="0">
-                                <tr>
-                                    <td class="hero">
-                                        <span class="brand">Шкеты</span>
-                                        <h1 class="hero-title">{{TITLE}}</h1>
-                                        <p class="hero-subtitle">
-                                            Используйте код ниже в том окне, где вы запросили письмо от панели Шкеты.
-                                        </p>
-                                    </td>
-                                </tr>
-                                <tr>
-                                    <td class="content">
-                                        <p class="description">{{DESCRIPTION}}</p>
-
-                                        <table role="presentation" class="code-box" width="100%" cellspacing="0" cellpadding="0" border="0">
-                                            <tr>
-                                                <td class="code-head">
-                                                    Код подтверждения
-                                                </td>
-                                            </tr>
-                                            <tr>
-                                                <td class="code-value-wrap">
-                                                    <div class="code-value">{{CODE}}</div>
-                                                </td>
-                                            </tr>
-                                        </table>
-
-                                        <p class="meta">
-                                            Код действует <strong>{{EXPIRY_TIME}} минут</strong>. После истечения срока запросите новый код.
-                                        </p>
-
-                                        <p class="hint">
-                                            Если письмо запросили не вы, ничего делать не нужно. Просто проигнорируйте это сообщение.
-                                        </p>
-                                    </td>
-                                </tr>
-                                <tr>
-                                    <td class="footer">
-                                        <p class="footer-text">
-                                            Это автоматическое письмо от сервиса Шкеты. Отвечать на него не нужно.
-                                        </p>
-                                    </td>
-                                </tr>
-                            </table>
-                        </td>
-                    </tr>
-                </table>
-            </td>
-        </tr>
-    </table>
+    <div class="container">
+        <div class="email-wrapper">
+            <div class="header">
+                <h1>{{TITLE}}</h1>
+            </div>
+            
+            <div class="content">
+                <div class="description">
+                    {{DESCRIPTION}}
+                </div>
+                
+                <div class="code-container">
+                    <div class="code">{{CODE}}</div>
+                </div>
+                
+                <div class="expiry-info">
+                    Код действителен в течение <span class="expiry-time">{{EXPIRY_TIME}} минут</span>
+                </div>
+            </div>
+            
+            <div class="footer">
+                <p class="footer-text">
+                    Если вы не запрашивали это письмо, просто проигнорируйте его.<br>
+                    &copy; 2024 Ваша Компания. Все права защищены.
+                </p>
+            </div>
+        </div>
+    </div>
 </body>
 </html>

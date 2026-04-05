@@ -1,4 +1,5 @@
 ﻿using Application.DTO;
+using Application.DTO.Scenario;
 using Application.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;

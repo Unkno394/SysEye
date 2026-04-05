@@ -1,9 +1,11 @@
-﻿using System.ComponentModel.DataAnnotations;
+﻿using Application.DTO.Scenario;
 
 namespace Web.Contracts.Requests;
 
+
 public class ExecuteScenarioRequest
 {
-    [Required]
     public Guid ScenarioId { get; set; }
+    public List<ExecuteScenarioCommandItem> Commands { get; set; } = new();
 }
+

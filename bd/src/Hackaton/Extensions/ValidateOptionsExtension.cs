@@ -15,7 +15,8 @@ namespace Web.Extensions
                 .Bind(configuration.GetSection("JwtOptions"))
                 .PostConfigure(options =>
                 {
-                    options.Secret = GetSecret(configuration, "JWT_SECRET", "jwt_secret")
+                    options.Secret = Environment.GetEnvironmentVariable("JWT_SECRET")
+                        ?? configuration["JWT_SECRET"]
                         ?? options.Secret;
                 })
                 .ValidateOnStart();
@@ -24,11 +25,13 @@ namespace Web.Extensions
                 .Bind(configuration.GetSection("SmtpOptions"))
                 .PostConfigure(options =>
                 {
-                    options.Email = GetSecret(configuration, "EMAIL", "email")
+                    options.Email = Environment.GetEnvironmentVariable("EMAIL")
+                        ?? configuration["EMAIL"]
                         ?? options.Email;
 
-                    options.Password = GetSecret(configuration, "EMAIL_PASSWORD", "email_password")
-                        ?? options.Password;
+                    options.Password = Environment.GetEnvironmentVariable("EMAIL_PASSWORD")
+                    ?? configuration["EMAIL_PASSWORD"]
+                    ?? options.Password;
                 })
                 .ValidateOnStart();
 
@@ -56,30 +59,21 @@ namespace Web.Extensions
                 .Bind(configuration.GetSection("ApiKeyOptions"))
                 .ValidateOnStart();
 
-            services.AddOptions<TelegramBotNotificationsOptions>()
-                .Bind(configuration.GetSection("TelegramBotNotificationsOptions"))
-                .ValidateOnStart();
-
             services.AddOptions<ConnectionStringsOptions>()
                 .Bind(configuration.GetSection("ConnectionOptions"))
                 .PostConfigure(options =>
                 {
-                    options.DatabasePassword = GetSecret(configuration, "DB_PASSWORD", "db_password")
+                    options.DatabasePassword = Environment.GetEnvironmentVariable("DB_PASSWORD")
+                        ?? configuration["DB_PASSWORD"]
                         ?? options.DatabasePassword;
 
-                    options.RedisPassword = GetSecret(configuration, "REDIS_PASSWORD", "redis_password")
+                    options.RedisPassword = Environment.GetEnvironmentVariable("REDIS_PASSWORD")
+                        ?? configuration["REDIS_PASSWORD"]
                         ?? options.RedisPassword;
                 })
                 .ValidateOnStart();
 
             return builder;
-        }
-
-        private static string? GetSecret(IConfiguration configuration, string envKey, string dockerSecretKey)
-        {
-            return Environment.GetEnvironmentVariable(envKey)
-                ?? configuration[envKey]
-                ?? configuration[dockerSecretKey];
         }
 
         public static IHostApplicationBuilder ValidateOptions(this IHostApplicationBuilder builder)
@@ -93,7 +87,6 @@ namespace Web.Extensions
             builder.Services.AddSingleton<IValidateOptions<LoggingOptions>, LoggingOptionsValidator>();
             builder.Services.AddSingleton<IValidateOptions<VerificationOptions>, VerificationOptionsValidator>();
             builder.Services.AddSingleton<IValidateOptions<ConnectionStringsOptions>, ConnectionStringsOptionsValidator>();
-            builder.Services.AddSingleton<IValidateOptions<TelegramBotNotificationsOptions>, TelegramBotNotificationsOptionsValidator>();
 
             return builder;
         }

@@ -12,6 +12,7 @@ public class Command : IEntity
     public string BashScript { get; set; }
     public string PowerShellScript { get; set; }
     public string? LogRegex { get; set; }
+    public string? Tag { get; set; }
 
     public bool IsDeleted { get; set; }
     public bool IsSystem { get; set; } = false;

@@ -1,4 +1,5 @@
 ﻿using Application.DTO;
+using Application.DTO.Scenario;
 using Domain.Models;
 
 namespace Application.Interfaces;

@@ -1,5 +1,5 @@
-﻿using System.Text.Json;
-using Application.DTO;
+﻿using Application.DTO;
+using Application.DTO.Agent;
 using Application.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -12,7 +12,7 @@ namespace Web.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 [ProducesResponseType(401)]
-public class AgentController(IAgentService agentService, IApiKeyService apiKeyService) : ControllerBase
+public class AgentController(IAgentService agentService) : ControllerBase
 {
     /// <summary>
     /// Создаёт нового агента.
@@ -25,25 +25,10 @@ public class AgentController(IAgentService agentService, IApiKeyService apiKeySe
             User.GetUserId(),
             request.Name,
             request.Os,
+            request.Tag,
             ct);
 
         return Ok(agent.Id);
-    }
-
-    /// <summary>
-    /// Создаёт агента и возвращает токен подключения для CLI.
-    /// </summary>
-    [HttpPost("connection-token")]
-    [Produces(typeof(AgentConnectionTokenDto))]
-    public async Task<ActionResult<AgentConnectionTokenDto>> CreateConnectionToken([FromBody] CreateAgentRequest request, CancellationToken ct)
-    {
-        var agent = await agentService.Create(
-            User.GetUserId(),
-            request.Name,
-            request.Os,
-            ct);
-
-        return Ok(await IssueConnectionToken(agent.Id, agent.Name, ct));
     }
 
     /// <summary>
@@ -58,18 +43,6 @@ public class AgentController(IAgentService agentService, IApiKeyService apiKeySe
         if (agent == null) return NotFound();
 
         return Ok(agent);
-    }
-
-    /// <summary>
-    /// Возвращает новый токен подключения для существующего агента.
-    /// </summary>
-    [HttpGet("{id:guid}/connection-token")]
-    [Produces(typeof(AgentConnectionTokenDto))]
-    public async Task<ActionResult<AgentConnectionTokenDto>> GetConnectionToken(Guid id, CancellationToken ct)
-    {
-        var agent = await agentService.Get(id, User.GetUserId(), ct);
-
-        return Ok(await IssueConnectionToken(agent.Id, agent.Name, ct));
     }
 
     /// <summary>
@@ -95,6 +68,7 @@ public class AgentController(IAgentService agentService, IApiKeyService apiKeySe
             User.GetUserId(),
             request.Name,
             request.Os,
+            request.Tag,
             ct);
 
         return Ok();
@@ -111,29 +85,11 @@ public class AgentController(IAgentService agentService, IApiKeyService apiKeySe
 
 
     [HttpPost("{id:guid}/heartbeat")]
-    [ProducesResponseType(typeof(DateTime), StatusCodes.Status200OK)]
+    [Produces(typeof(DateTime))]
     public async Task<ActionResult<DateTime>> Heartbeat(Guid id, CancellationToken ct)
     {
         var timestamp = await agentService.HeartbeatAsync(id, User.GetUserId(), ct);
 
         return Ok(timestamp);
-    }
-
-    private async Task<AgentConnectionTokenDto> IssueConnectionToken(Guid agentId, string agentName, CancellationToken ct)
-    {
-        var apiKey = await apiKeyService.Generate(agentId, 30, ct);
-        var payload = JsonSerializer.SerializeToUtf8Bytes(new
-        {
-            agentId,
-            apiKey = apiKey.Value,
-            name = agentName
-        });
-
-        return new AgentConnectionTokenDto
-        {
-            AgentId = agentId,
-            Name = agentName,
-            Token = Convert.ToBase64String(payload),
-        };
     }
 }

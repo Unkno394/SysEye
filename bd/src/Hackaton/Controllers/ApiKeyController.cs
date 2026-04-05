@@ -1,15 +1,12 @@
-﻿using Application.DTO;
+﻿using Application.DTO.ApiKey;
 using Application.Interfaces;
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Web.Contracts.Requests;
+using Web.Extensions;
 
 namespace Web.Controllers;
 
-[Authorize]
-[ApiController]
 [Route("[controller]")]
-[ProducesResponseType(401)]
 public class ApiKeyController(IApiKeyService apiKeyService) : ControllerBase
 {
     /// <summary>
@@ -35,7 +32,7 @@ public class ApiKeyController(IApiKeyService apiKeyService) : ControllerBase
     /// Информация о API-ключе агента
     /// </summary>
     [HttpGet("[action]")]
-    [Produces(typeof(ApiKeySmallDto))]
-    public async Task<IActionResult> Info([FromQuery] Guid AgentId, CancellationToken ct)
-        => Ok(await apiKeyService.GetKey(AgentId, ct));
+    [Produces(typeof(IEnumerable<ApiKeyDto>))]
+    public async Task<IActionResult> Info([FromQuery] Guid AgentId,CancellationToken ct)
+        => Ok(await apiKeyService.GetKey(User.GetUserId(), ct));
 }

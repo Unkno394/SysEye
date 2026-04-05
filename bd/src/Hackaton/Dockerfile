@@ -7,7 +7,6 @@ COPY src/Domain/*.csproj Domain/
 COPY src/Hackaton/*.csproj Hackaton/
 COPY src/Infrastructure/*.csproj Infrastructure/
 
-RUN dotnet sln remove Test/Test.csproj 2>/dev/null || true
 RUN dotnet restore
 
 COPY src .

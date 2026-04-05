@@ -1,26 +1,25 @@
-﻿using System.Net.Http.Json;
-using System.Text.Json.Serialization;
+﻿using Infrastructure.Extensions;
 using Infrastructure.Dto;
+using Grpc.Net.Client;
 using Infrastructure.Interfaces;
-using Infrastructure.Options;
-using Microsoft.Extensions.Logging;
+using OpenTelemetry.Proto.Common.V1;
+using OpenTelemetry.Proto.Collector.Logs.V1;
+using OpenTelemetry.Proto.Logs.V1;
+using OpenTelemetry.Proto.Resource.V1;
 using Microsoft.Extensions.Options;
+using Infrastructure.Options;
 
 namespace Infrastructure.Services;
 
-public sealed class AgentOtlpSender : IAgentOtlpSender, IDisposable
+public class AgentOtlpSender : IAgentOtlpSender, IDisposable
 {
-    private readonly HttpClient _httpClient;
-    private readonly ILogger<AgentOtlpSender> _logger;
+    private readonly GrpcChannel _channel;
+    private readonly LogsService.LogsServiceClient _client;
 
-    public AgentOtlpSender(IOptions<LokiOptions> options, ILogger<AgentOtlpSender> logger)
+    public AgentOtlpSender(IOptions<OpenTelemetryOptions> options)
     {
-        _logger = logger;
-        _httpClient = new HttpClient
-        {
-            BaseAddress = new Uri(options.Value.BaseUrl, UriKind.Absolute),
-            Timeout = TimeSpan.FromSeconds(options.Value.TimeoutSeconds),
-        };
+        _channel = GrpcChannel.ForAddress(options.Value.Endpoint);
+        _client = new LogsService.LogsServiceClient(_channel);
     }
 
     public async Task SendAsync(
@@ -28,118 +27,100 @@ public sealed class AgentOtlpSender : IAgentOtlpSender, IDisposable
         AgentLogDto log,
         CancellationToken cancellationToken = default)
     {
-        var labels = new Dictionary<string, string>
+        var request = new ExportLogsServiceRequest();
+
+        var resourceLogs = new ResourceLogs
         {
-            ["service_name"] = "agent-signalr-gateway",
-            ["agent_id"] = agentId,
-            ["severity_text"] = string.IsNullOrWhiteSpace(log.Level) ? "Information" : log.Level,
-            ["detected_level"] = MapLevel(log.Level),
+            Resource = new Resource()
         };
 
-        if (log.ExecutionId.HasValue)
-            labels["execution_id"] = log.ExecutionId.Value.ToString();
+        resourceLogs.Resource.Attributes.Add(new KeyValue
+        {
+            Key = "service.name",
+            Value = new AnyValue { StringValue = "agent-signalr-gateway" }
+        });
+
+        resourceLogs.Resource.Attributes.Add(new KeyValue
+        {
+            Key = "log.source",
+            Value = new AnyValue { StringValue = "signalr-agent" }
+        });
+
+        var scopeLogs = new ScopeLogs();
+
+        var record = new LogRecord
+        {
+            Body = new AnyValue
+            {
+                StringValue = log.Message ?? string.Empty
+            },
+            SeverityNumber = MapSeverity(log.Level),
+            SeverityText = string.IsNullOrWhiteSpace(log.Level) ? "Information" : log.Level,
+            TimeUnixNano = log.Timestamp.ToUnixNano(),
+            ObservedTimeUnixNano = DateTimeOffset.UtcNow.ToUnixNano()
+        };
+
+        record.Attributes.Add(new KeyValue
+        {
+            Key = "agent.id",
+            Value = new AnyValue { StringValue = agentId }
+        });
+
+        record.Attributes.Add(new KeyValue
+        {
+            Key = "execution.id",
+            Value = new AnyValue { StringValue = log.ExecutionId.ToString() }
+        });
 
         if (log.CommandId.HasValue)
-            labels["command_id"] = log.CommandId.Value.ToString();
-
-        if (!string.IsNullOrWhiteSpace(log.Category))
-            labels["log_category"] = log.Category!;
-
-        var payload = new LokiPushRequest
         {
-            Streams =
-            [
-                new LokiStream
-                {
-                    Stream = labels,
-                    Values =
-                    [
-                        [
-                            ToUnixNanoString(log.Timestamp),
-                            log.Message ?? string.Empty,
-                        ]
-                    ]
-                }
-            ]
-        };
-
-        try
-        {
-            using var response = await _httpClient.PostAsJsonAsync(
-                "/loki/api/v1/push",
-                payload,
-                cancellationToken);
-
-            if (!response.IsSuccessStatusCode)
+            record.Attributes.Add(new KeyValue
             {
-                _logger.LogWarning(
-                    "Loki отклонил execution log для agent {AgentId}. StatusCode: {StatusCode}",
-                    agentId,
-                    (int)response.StatusCode);
-            }
+                Key = "command.id",
+                Value = new AnyValue { StringValue = log.CommandId.Value.ToString() }
+            });
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+
+        if (string.IsNullOrEmpty(log.Category))
         {
-            _logger.LogWarning(
-                "Не удалось отправить execution log в Loki для agent {AgentId}: таймаут соединения.",
-                agentId);
+            record.Attributes.Add(new KeyValue
+            {
+                Key = "category",
+                Value = new AnyValue { StringValue = log.CommandId.Value.ToString() }
+            });
         }
-        catch (HttpRequestException ex)
-        {
-            _logger.LogWarning(
-                ex,
-                "Не удалось отправить execution log в Loki для agent {AgentId}. Продолжаю без внешнего log sink.",
-                agentId);
-        }
+
+        scopeLogs.LogRecords.Add(record);
+        resourceLogs.ScopeLogs.Add(scopeLogs);
+        request.ResourceLogs.Add(resourceLogs);
+
+        await _client.ExportAsync(request, cancellationToken: cancellationToken)
+            .ResponseAsync
+            .ConfigureAwait(false);
     }
 
-    private static string MapLevel(string? level)
+    private static SeverityNumber MapSeverity(string? level)
     {
         if (string.IsNullOrWhiteSpace(level))
-            return "info";
+            return SeverityNumber.Info;
 
         return level.Trim().ToLowerInvariant() switch
         {
-            "trace" => "trace",
-            "debug" => "debug",
-            "information" => "info",
-            "info" => "info",
-            "warning" => "warn",
-            "warn" => "warn",
-            "error" => "error",
-            "critical" => "fatal",
-            "fatal" => "fatal",
-            _ => "info"
+            "trace" => SeverityNumber.Trace,
+            "debug" => SeverityNumber.Debug,
+            "information" => SeverityNumber.Info,
+            "info" => SeverityNumber.Info,
+            "warning" => SeverityNumber.Warn,
+            "warn" => SeverityNumber.Warn,
+            "error" => SeverityNumber.Error,
+            "critical" => SeverityNumber.Fatal,
+            "fatal" => SeverityNumber.Fatal,
+            _ => SeverityNumber.Info
         };
     }
 
     public void Dispose()
     {
-        _httpClient.Dispose();
-    }
-
-    private static string ToUnixNanoString(DateTimeOffset value)
-    {
-        var utc = value.ToUniversalTime();
-        var seconds = utc.ToUnixTimeSeconds();
-        var ticksWithinSecond = utc.Ticks % TimeSpan.TicksPerSecond;
-        var nanosWithinSecond = ticksWithinSecond * 100L;
-
-        return (seconds * 1_000_000_000L + nanosWithinSecond).ToString();
-    }
-
-    private sealed class LokiPushRequest
-    {
-        [JsonPropertyName("streams")]
-        public List<LokiStream> Streams { get; set; } = [];
-    }
-
-    private sealed class LokiStream
-    {
-        [JsonPropertyName("stream")]
-        public Dictionary<string, string> Stream { get; set; } = [];
-
-        [JsonPropertyName("values")]
-        public List<List<string>> Values { get; set; } = [];
+        _channel.Dispose();
     }
 }

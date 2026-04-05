@@ -1,6 +1,6 @@
 ﻿namespace Infrastructure.Options;
 
-public sealed class OpenTelemetryOptions
+public class OpenTelemetryOptions
 {
     public string Endpoint { get; set; }
 }

@@ -11,7 +11,6 @@ public class Scenario : IEntity
     public string Description { get; set; } = string.Empty;
 
     public bool IsDeleted { get; set; } = false;
-    public bool IsSystem { get; set; } = false;
 
     public virtual User User { get; set; } = null!;
     public virtual ICollection<ScenarioCommand> Commands { get; set; } = new List<ScenarioCommand>();

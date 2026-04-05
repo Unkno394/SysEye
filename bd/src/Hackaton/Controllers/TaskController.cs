@@ -8,7 +8,7 @@ namespace Web.Controllers;
 
 [Authorize]
 [ApiController]
-[Route("api/[controller]")]
+[Route("[controller]")]
 public class TaskController(
     ITaskService taskService,
     ILogger<TaskController> logger) : ControllerBase
@@ -25,7 +25,7 @@ public class TaskController(
         [FromBody] ExecuteCommandRequest request,
         CancellationToken cancellationToken)
     {
-        var executionId = await taskService.ExecuteCommandAsync(
+        var executionId = await taskService.ExecuteCommand(
             User.GetUserId(),
             agentId,
             request,
@@ -37,37 +37,22 @@ public class TaskController(
     /// <summary>
     /// Запускает выполнение сценария на указанном агенте.
     /// </summary>
-    [Produces(typeof(IReadOnlyCollection<Guid>))]
+    /// <param name="agentId">Идентификатор агента.</param>
+    /// <param name="request">Данные для выполнения команды.</param>
+    [Produces(typeof(Guid))]
     [HttpPost("agents/{agentId:guid}/scenario")]
     public async Task<IActionResult> ExecuteScenario(
         [FromRoute] Guid agentId,
         [FromBody] ExecuteScenarioRequest request,
         CancellationToken cancellationToken)
     {
-        var executionIds = await taskService.ExecuteScenarioAsync(
-            User.GetUserId(),
+        var executionId = await taskService.ExecuteScenario(User.GetUserId(),
             agentId,
             request.ScenarioId,
+            request.Commands,
             cancellationToken);
 
-        return Ok(executionIds);
-    }
-
-    /// <summary>
-    /// Отменяет выполнение команды.
-    /// </summary>
-    [HttpPost("executions/{executionId:guid}/cancel")]
-    public async Task<IActionResult> CancelExecution(
-        [FromRoute] Guid executionId,
-        CancellationToken cancellationToken)
-    {
-        await taskService.CancelTaskAsync(
-            executionId,
-            User.GetUserId(),
-            cancellationToken);
-
-        logger.LogInformation("Пользователь запросил отмену выполнения {ExecutionId}", executionId);
-        return Ok();
+        return Ok(executionId);
     }
 
     /// <summary>
@@ -102,7 +87,7 @@ public class TaskController(
         [FromQuery] PagedRequest request,
         CancellationToken cancellationToken)
     {
-        var tasks = await taskService.GetTasksByUserAsync(
+        var tasks = await taskService.GetTasksByUser(
             User.GetUserId(),
             request.Take,
             request.Skip,

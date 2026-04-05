@@ -20,6 +20,10 @@ public class AgentConfiguration : IEntityTypeConfiguration<Agent>
             .IsRequired()
             .HasColumnType("uuid");
 
+        builder.Property(x => x.Tag)
+            .HasMaxLength(100)
+            .HasColumnType("varchar(100)");
+
         builder.Property(x => x.Name)
             .IsRequired()
             .HasMaxLength(100)
@@ -27,17 +31,6 @@ public class AgentConfiguration : IEntityTypeConfiguration<Agent>
 
         builder.Property(x => x.Os)
             .HasColumnType("integer");
-
-        builder.Property(x => x.IpAddress)
-            .HasMaxLength(64)
-            .HasColumnType("varchar(64)");
-
-        builder.Property(x => x.Port)
-            .HasColumnType("integer");
-
-        builder.Property(x => x.Distribution)
-            .HasMaxLength(128)
-            .HasColumnType("varchar(128)");
 
         builder.Property(x => x.LastHeartbeatAt)
             .IsRequired()

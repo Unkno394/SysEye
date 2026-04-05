@@ -1,6 +1,5 @@
 ﻿using API.Contracts.Requests;
 using Application.Interfaces;
-using Domain.Exceptions;
 using Infrastructure.Interfaces;
 using Infrastructure.Options;
 using Microsoft.AspNetCore.Mvc;
@@ -61,38 +60,20 @@ public class AuthController(
         var refreshToken = Request.Cookies[_options.RefreshCookieName];
 
         if (string.IsNullOrEmpty(refreshToken))
-        {
-            DeleteTokens();
-            return Unauthorized("Сессия не активна");
-        }
+            return BadRequest("Отсутсвует рефреш токен");
 
         var principal = jwtProvider.ValidateRefreshToken(refreshToken);
         if (principal == null)
-        {
-            DeleteTokens();
             return Unauthorized("Рефреш токен не корректен");
-        }
 
         var userId = principal.GetUserId();
         var sessionId = principal.GetSessionId();
 
-        try
-        {
-            var tokens = await authService.Refresh(refreshToken, userId, sessionId, ct);
+        var tokens = await authService.Refresh(refreshToken, userId, sessionId, ct);
 
-            SetTokens(tokens.AccessToken, tokens.RefreshToken);
+        SetTokens(tokens.AccessToken, tokens.RefreshToken);
 
-            return Ok();
-        }
-        catch (Exception ex) when (
-            ex is UnauthorizedException
-            or NotFoundException
-            or BadRequestException
-            or TeapotException)
-        {
-            DeleteTokens();
-            return Unauthorized(ex.Message);
-        }
+        return Ok();
     }
 
     private void SetTokens(string accessToken, string refreshToken)

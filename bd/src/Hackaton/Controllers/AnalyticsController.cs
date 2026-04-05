@@ -1,4 +1,4 @@
-﻿using Application.DTO;
+﻿using Application.DTO.Analytics;
 using Application.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -12,51 +12,49 @@ namespace Web.Controllers;
 [ProducesResponseType(401)]
 public class AnalyticsController(IAnalyticsService analyticsService) : ControllerBase
 {
+    /// <summary>
+    /// Получает аналитику по всем агентам пользователя
+    /// </summary>
     [HttpGet("agents")]
     [Produces(typeof(IReadOnlyCollection<AgentAnalyticsDto>))]
-    public async Task<ActionResult<IReadOnlyCollection<AgentAnalyticsDto>>> GetAgents(CancellationToken cancellationToken)
+    public async Task<ActionResult<IReadOnlyCollection<AgentAnalyticsDto>>> GetAgents(CancellationToken ct)
     {
-        var analytics = await analyticsService.GetAgentsAnalyticsAsync(User.GetUserId(), cancellationToken);
-        return Ok(analytics);
+        var result = await analyticsService.GetAgentAnalytics(User.GetUserId(), ct);
+        return Ok(result);
     }
 
+    /// <summary>
+    /// Получает аналитику по конкретному агенту
+    /// </summary>
+    /// <param name="agentId">Идентификатор агента</param>
     [HttpGet("agents/{agentId:guid}")]
     [Produces(typeof(AgentAnalyticsDto))]
-    public async Task<ActionResult<AgentAnalyticsDto>> GetAgent(Guid agentId, CancellationToken cancellationToken)
+    public async Task<ActionResult<AgentAnalyticsDto>> GetAgent(Guid agentId, CancellationToken ct)
     {
-        var analytics = await analyticsService.GetAgentAnalyticsAsync(User.GetUserId(), agentId, cancellationToken);
-        return Ok(analytics);
+        var result = await analyticsService.GetAgentAnalyticsById(User.GetUserId(), agentId, ct);
+        return Ok(result);
     }
 
-    [HttpGet("agents/{agentId:guid}/metrics")]
-    [Produces(typeof(AgentMetricsDto))]
-    public async Task<ActionResult<AgentMetricsDto>> GetAgentMetrics(Guid agentId, CancellationToken cancellationToken)
-    {
-        var metrics = await analyticsService.GetAgentMetricsAsync(User.GetUserId(), agentId, cancellationToken);
-        return Ok(metrics);
-    }
-
-    [HttpGet("agents/ratings")]
-    [Produces(typeof(IReadOnlyCollection<AgentRatingDto>))]
-    public async Task<ActionResult<IReadOnlyCollection<AgentRatingDto>>> GetAgentRatings(CancellationToken cancellationToken)
-    {
-        var ratings = await analyticsService.GetAgentRatingsAsync(User.GetUserId(), cancellationToken);
-        return Ok(ratings);
-    }
-
+    /// <summary>
+    /// Получает аналитику по всем командам пользователя
+    /// </summary>
     [HttpGet("commands")]
     [Produces(typeof(IReadOnlyCollection<CommandAnalyticsDto>))]
-    public async Task<ActionResult<IReadOnlyCollection<CommandAnalyticsDto>>> GetCommands(CancellationToken cancellationToken)
+    public async Task<ActionResult<IReadOnlyCollection<CommandAnalyticsDto>>> GetCommands(CancellationToken ct)
     {
-        var analytics = await analyticsService.GetCommandsAnalyticsAsync(User.GetUserId(), cancellationToken);
-        return Ok(analytics);
+        var result = await analyticsService.GetCommandAnalytics(User.GetUserId(), ct);
+        return Ok(result);
     }
 
+    /// <summary>
+    /// Получает аналитику по конкретной команде
+    /// </summary>
+    /// <param name="commandId">Идентификатор команды</param>
     [HttpGet("commands/{commandId:guid}")]
     [Produces(typeof(CommandAnalyticsDto))]
-    public async Task<ActionResult<CommandAnalyticsDto>> GetCommand(Guid commandId, CancellationToken cancellationToken)
+    public async Task<ActionResult<CommandAnalyticsDto>> GetCommand(Guid commandId, CancellationToken ct)
     {
-        var analytics = await analyticsService.GetCommandAnalyticsAsync(User.GetUserId(), commandId, cancellationToken);
-        return Ok(analytics);
+        var result = await analyticsService.GetCommandAnalyticsById(User.GetUserId(), commandId, ct);
+        return Ok(result);
     }
 }

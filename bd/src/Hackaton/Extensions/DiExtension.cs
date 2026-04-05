@@ -1,14 +1,13 @@
-﻿using Application.Interfaces;
+﻿using Application.Exporters;
+using Application.Exporters.Interfaces;
+using Application.Interfaces;
 using Application.Services;
-using Application.Services.Internal;
 using Infrastructure.Auth;
 using Infrastructure.BackgroundJobs.Jobs;
 using Infrastructure.BackgroundJobs.Jobs.Interfaces;
 using Infrastructure.Email;
 using Infrastructure.Interfaces;
-using Infrastructure.Options;
 using Infrastructure.Services;
-using Microsoft.Extensions.Options;
 using Web.Services;
 
 namespace Web.Extensions;
@@ -34,20 +33,20 @@ public static class DiExtension
 
     public static IServiceCollection AddServices(this IServiceCollection services)
     {
-        services.AddScoped<IRealtimeNotifier, RealtimeNotifier>();
         services.AddScoped<IEmailConfirmService, EmailConfirmService>();
 
-        services.AddHttpClient<ITaskNotificationPublisher, TaskWebhookNotifier>((serviceProvider, client) =>
-        {
-            var settings = serviceProvider.GetRequiredService<IOptions<TelegramBotNotificationsOptions>>().Value;
-            client.Timeout = TimeSpan.FromSeconds(settings.TimeoutSeconds);
-        });
+        services.AddScoped<IAnalyticsExportService, AnalyticsExportService>();
+        services.AddScoped<IAnalyticsService, AnalyticsService>();
+
+        services.AddScoped<IAnalyticsCsvExporter, AnalyticsCsvExporter>();
+        services.AddScoped<IAnalyticsPdfExporter, AnalyticsPdfExporter>();
+        services.AddScoped<IAnalyticsJsonExporter, AnalyticsJsonExporter>();
+
         services.AddScoped<IAgentOtlpSender, AgentOtlpSender>();
         services.AddScoped<IAgentCommandDispatcher, AgentCommandDispatcher>();
+        services.AddScoped<IAgentLogsService, AgentLogsService>();
 
         services.AddScoped<IAgentService, AgentService>();
-        services.AddScoped<IAgentLogsService, AgentLogsService>();
-        services.AddScoped<IAnalyticsService, AnalyticsService>();
         services.AddScoped<IScenarioService, ScenarioService>();
         services.AddScoped<ICommandService, CommandService>();
         services.AddScoped<ITaskService, TaskService>();

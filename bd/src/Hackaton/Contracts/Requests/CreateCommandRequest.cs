@@ -9,4 +9,5 @@ public class CreateCommandRequest
     public string? Description { get; set; } = string.Empty;
     public string? BashScript { get; set; } = string.Empty;
     public string? PowerShellScript { get; set; } = string.Empty;
+    public string? Tag { get; set; } = string.Empty;
 }

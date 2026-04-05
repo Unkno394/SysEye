@@ -25,6 +25,7 @@ public class CommandController(ICommandService commandService) : ControllerBase
             request.Description,
             request.BashScript,
             request.PowerShellScript,
+            request.Tag,
             ct);
 
         return Ok(command.Id);
@@ -44,6 +45,7 @@ public class CommandController(ICommandService commandService) : ControllerBase
             request.BashScript,
             request.PowerShellScript,
             request.Regex,
+            request.Tag,
             ct);
 
         return Ok();

@@ -29,15 +29,20 @@ public class CommandConfiguration : IEntityTypeConfiguration<Command>
             .HasMaxLength(500)
             .HasColumnType("varchar(500)");
 
+        builder.Property(x => x.Tag)
+            .HasMaxLength(50)
+            .HasColumnType("varchar(50)");
+
+        builder.Property(x => x.LogRegex)
+            .HasMaxLength(250)
+            .HasColumnType("varchar(250)");
+
         builder.Property(x => x.BashScript)
             .IsRequired()
             .HasColumnType("text");
 
         builder.Property(x => x.PowerShellScript)
             .IsRequired()
-            .HasColumnType("text");
-
-        builder.Property(x => x.LogRegex)
             .HasColumnType("text");
 
         builder.Property(x => x.IsSystem)
