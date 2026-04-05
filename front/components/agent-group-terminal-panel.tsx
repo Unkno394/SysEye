@@ -6,6 +6,7 @@ import { apiJson } from "@/lib/api-client";
 import type { AgentDto, AgentTaskDto, CommandDto, ExecutionLogDto, PagedResult, ScenarioDetailsDto, ScenarioDto, TaskExecutionDto, TaskStatus } from "@/lib/backend-types";
 import { getAgentStatus, getOsLabel, getRelativeHeartbeatLabel } from "@/lib/backend-types";
 import { useClientRealtime } from "@/lib/client-realtime";
+import { DIAGNOSTIC_INTERRUPTED_NOTE, DIAGNOSTIC_SUMMARY_TEXT, DIAGNOSTIC_SUMMARY_TITLE } from "@/lib/diagnostics";
 import { buildExecutionSummary, createOptimisticExecution, extractPlaceholderTokens, getPlaceholderIndex, isExecutionTerminalStatus, mapExecutionToHistoryItem } from "@/lib/execution-history";
 import { joinExecutionLogMessages, matchesExecutionLogRegex, mergeExecutionLogs } from "@/lib/execution-logs";
 import { ensureServerAgentOs } from "@/lib/local-agent-runtime";
@@ -199,6 +200,9 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
   const [regexLogsByTaskId, setRegexLogsByTaskId] = useState<Record<string, ExecutionLogDto[]>>({});
   const [loadingLogsTaskIds, setLoadingLogsTaskIds] = useState<string[]>([]);
   const optimisticTaskDeadlinesRef = useRef<Record<string, number>>({});
+  const scheduledReloadTimeoutIdsRef = useRef<number[]>([]);
+  const realtimeReloadTimeoutRef = useRef<number | null>(null);
+  const loadTasksRequestIdRef = useRef(0);
   const commandsById = useMemo(() => new Map(commands.map((command) => [command.id, command])), [commands]);
   const onlineAgents = useMemo(
     () => agents.filter((agent) => getAgentStatus(agent.lastHeartbeatAt) === "online"),
@@ -210,12 +214,33 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
       return;
     }
 
-    window.setTimeout(() => {
+    const firstTimeoutId = window.setTimeout(() => {
       void loadTasks();
     }, 1_200);
-    window.setTimeout(() => {
+    const secondTimeoutId = window.setTimeout(() => {
       void loadTasks();
     }, 4_000);
+
+    scheduledReloadTimeoutIdsRef.current = [
+      ...scheduledReloadTimeoutIdsRef.current,
+      firstTimeoutId,
+      secondTimeoutId,
+    ];
+  };
+
+  const scheduleRealtimeTasksReload = (delay = 600) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (realtimeReloadTimeoutRef.current !== null) {
+      window.clearTimeout(realtimeReloadTimeoutRef.current);
+    }
+
+    realtimeReloadTimeoutRef.current = window.setTimeout(() => {
+      realtimeReloadTimeoutRef.current = null;
+      void loadTasks();
+    }, delay);
   };
 
   const pushOptimisticTask = (agent: AgentDto, executionId: string, commandId: string) => {
@@ -334,6 +359,8 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
   };
 
   const loadTasks = async () => {
+    const requestId = ++loadTasksRequestIdRef.current;
+
     if (!agents.length) {
       setServerTasks([]);
       return;
@@ -368,6 +395,10 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
         }
       }),
     );
+
+    if (requestId !== loadTasksRequestIdRef.current) {
+      return;
+    }
 
     const successfulAgentIds = new Set(taskGroups.filter((group) => Array.isArray(group.tasks)).map((group) => group.agentId));
     const loadedTasks = taskGroups.flatMap((group) => group.tasks ?? []);
@@ -419,6 +450,12 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
 
     return () => {
       window.clearInterval(intervalId);
+      scheduledReloadTimeoutIdsRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
+      scheduledReloadTimeoutIdsRef.current = [];
+      if (realtimeReloadTimeoutRef.current !== null) {
+        window.clearTimeout(realtimeReloadTimeoutRef.current);
+        realtimeReloadTimeoutRef.current = null;
+      }
     };
   }, [agents, commands]);
 
@@ -445,13 +482,15 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
     onTaskQueued: ({ agentId, task }) => {
       if (trackedAgentIds.has(agentId)) {
         patchTaskFromRealtime(agentId, task);
-        void loadTasks();
+        scheduleRealtimeTasksReload();
       }
     },
     onTaskUpdated: ({ agentId, task }) => {
       if (trackedAgentIds.has(agentId)) {
         patchTaskFromRealtime(agentId, task);
-        void loadTasks();
+        if (isExecutionTerminalStatus(task.status)) {
+          scheduleRealtimeTasksReload(250);
+        }
       }
     },
     onExecutionLogReceived: (entry) => {
@@ -1136,6 +1175,12 @@ export function AgentGroupTerminalPanel({ groupName, agents, commands }: AgentGr
                 <CalendarRange size={14} />
                 Фильтры
               </button>
+            </div>
+
+            <div className="mt-3 rounded-2xl border border-emerald-400/15 bg-emerald-400/[0.07] p-3">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-200/80">{DIAGNOSTIC_SUMMARY_TITLE}</div>
+              <div className="mt-2 text-xs text-white/65">{DIAGNOSTIC_SUMMARY_TEXT}</div>
+              <div className="mt-2 text-[11px] text-white/50">{DIAGNOSTIC_INTERRUPTED_NOTE}</div>
             </div>
 
             <div className="terminal-scroll mt-4 min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">

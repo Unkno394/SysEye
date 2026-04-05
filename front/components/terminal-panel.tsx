@@ -6,7 +6,9 @@ import { apiJson } from "@/lib/api-client";
 import type { AgentDto, AgentStatus, AgentTaskDto, CommandDto, ExecutionLogDto, PagedResult, ScenarioDetailsDto, ScenarioDto, TaskExecutionDto, TaskStatus } from "@/lib/backend-types";
 import { getAgentStatus, getRelativeHeartbeatLabel } from "@/lib/backend-types";
 import { useClientRealtime } from "@/lib/client-realtime";
-import { buildExecutionSummary, createOptimisticExecution, extractPlaceholderTokens, getPlaceholderIndex, isExecutionTerminalStatus, mapExecutionToHistoryItem } from "@/lib/execution-history";
+import { buildDiagnosticComparisons, DIAGNOSTIC_INTERRUPTED_NOTE, DIAGNOSTIC_SUMMARY_TEXT, DIAGNOSTIC_SUMMARY_TITLE, isIgnoredComparisonStatus } from "@/lib/diagnostics";
+import type { DiagnosticComparisonItem } from "@/lib/diagnostics";
+import { buildExecutionSummary, createOptimisticExecution, extractPlaceholderTokens, getPlaceholderIndex, isExecutionTerminalStatus, mapExecutionToHistoryItem, type ExecutionHistoryItem } from "@/lib/execution-history";
 import { joinExecutionLogMessages, matchesExecutionLogRegex, mergeExecutionLogs } from "@/lib/execution-logs";
 import { ensureServerAgentOs } from "@/lib/local-agent-runtime";
 import { GlassCard, SectionTitle, StatusBadge } from "@/components/ui";
@@ -26,6 +28,14 @@ type TerminalTask = {
   rawOutput?: string;
   rawError?: string;
   kind: "command" | "scenario";
+};
+
+type ScenarioRun = {
+  id: string;
+  scenarioId: string;
+  scenarioName: string;
+  executionIds: string[];
+  createdAt: string;
 };
 
 type PlaceholderInput = {
@@ -121,9 +131,63 @@ function normalizeExecutionIds(value: unknown) {
   return [];
 }
 
+function getComparisonTone(state: "no-data" | "no-baseline" | "unchanged" | "changed" | "ignored") {
+  switch (state) {
+    case "changed":
+      return "border-amber-400/20 bg-amber-400/10 text-amber-100";
+    case "unchanged":
+      return "border-emerald-400/20 bg-emerald-400/10 text-emerald-100";
+    case "ignored":
+      return "border-white/10 bg-white/[0.04] text-white/70";
+    default:
+      return "border-white/10 bg-white/[0.03] text-white/65";
+  }
+}
+
+function getComparisonLabel(state: "no-data" | "no-baseline" | "unchanged" | "changed" | "ignored") {
+  switch (state) {
+    case "changed":
+      return "Изменилось";
+    case "unchanged":
+      return "Без изменений";
+    case "ignored":
+      return "Пропущено";
+    case "no-baseline":
+      return "Нет базы";
+    default:
+      return "Нет данных";
+  }
+}
+
+function getComparisonDetails(item: DiagnosticComparisonItem) {
+  const lines: string[] = [];
+
+  if (item.comparisonState === "changed") {
+    lines.push(
+      ...item.addedLines.slice(0, 2).map((line) => `+ ${line}`),
+      ...item.removedLines.slice(0, 2).map((line) => `- ${line}`),
+    );
+  } else if (item.comparisonState === "unchanged") {
+    lines.push("Последние успешные запуски совпадают.");
+  } else if (item.comparisonState === "ignored") {
+    lines.push("Последний запуск был прерван, успешной базы для сравнения пока нет.");
+  } else if (item.comparisonState === "no-baseline") {
+    lines.push("Нужен ещё один успешный запуск для сравнения.");
+  } else {
+    lines.push("Ещё нет успешных запусков для сравнения.");
+  }
+
+  if (item.comparisonState !== "ignored" && isIgnoredComparisonStatus(item.latestAttemptStatus)) {
+    lines.push("Последний прерванный запуск пропущен и не участвует в сравнении.");
+  }
+
+  return lines;
+}
+
 export function TerminalPanel({ agent, commands, status }: TerminalPanelProps) {
   const [serverExecutions, setServerExecutions] = useState<TaskExecutionDto[]>([]);
   const [loadedScenarios, setLoadedScenarios] = useState<ScenarioDetailsDto[]>([]);
+  const [scenarioRuns, setScenarioRuns] = useState<ScenarioRun[]>([]);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<ExtendedHistoryStatusFilter>("all");
   const [draftStatusFilter, setDraftStatusFilter] = useState<ExtendedHistoryStatusFilter>("all");
@@ -144,6 +208,9 @@ export function TerminalPanel({ agent, commands, status }: TerminalPanelProps) {
   const [regexLogsByTaskId, setRegexLogsByTaskId] = useState<Record<string, ExecutionLogDto[]>>({});
   const [loadingLogsTaskIds, setLoadingLogsTaskIds] = useState<string[]>([]);
   const optimisticExecutionDeadlinesRef = useRef<Record<string, number>>({});
+  const scheduledReloadTimeoutIdsRef = useRef<number[]>([]);
+  const realtimeReloadTimeoutRef = useRef<number | null>(null);
+  const loadTasksRequestIdRef = useRef(0);
   const panelStatus = status ?? getAgentStatus(agent.lastHeartbeatAt);
   const isAgentOnline = panelStatus === "online";
   const commandsById = useMemo(() => new Map(commands.map((command) => [command.id, command])), [commands]);
@@ -153,12 +220,33 @@ export function TerminalPanel({ agent, commands, status }: TerminalPanelProps) {
       return;
     }
 
-    window.setTimeout(() => {
+    const firstTimeoutId = window.setTimeout(() => {
       void loadTasks();
     }, 1_200);
-    window.setTimeout(() => {
+    const secondTimeoutId = window.setTimeout(() => {
       void loadTasks();
     }, 4_000);
+
+    scheduledReloadTimeoutIdsRef.current = [
+      ...scheduledReloadTimeoutIdsRef.current,
+      firstTimeoutId,
+      secondTimeoutId,
+    ];
+  };
+
+  const scheduleRealtimeTasksReload = (delay = 600) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (realtimeReloadTimeoutRef.current !== null) {
+      window.clearTimeout(realtimeReloadTimeoutRef.current);
+    }
+
+    realtimeReloadTimeoutRef.current = window.setTimeout(() => {
+      realtimeReloadTimeoutRef.current = null;
+      void loadTasks();
+    }, delay);
   };
 
   const pushOptimisticTask = (executionId: string, commandId: string) => {
@@ -247,11 +335,18 @@ export function TerminalPanel({ agent, commands, status }: TerminalPanelProps) {
   };
 
   const loadTasks = useCallback(async () => {
+    const requestId = ++loadTasksRequestIdRef.current;
+
     try {
       const data = await apiJson<PagedResult<TaskExecutionDto>>(
         `/api/hackaton/task/agents/${agent.id}?take=50&skip=0`,
         { method: "GET" },
       );
+
+      if (requestId !== loadTasksRequestIdRef.current) {
+        return;
+      }
+
       mergeLoadedExecutions(data.items ?? []);
     } catch {
       return;
@@ -302,6 +397,12 @@ export function TerminalPanel({ agent, commands, status }: TerminalPanelProps) {
 
     return () => {
       window.clearInterval(intervalId);
+      scheduledReloadTimeoutIdsRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
+      scheduledReloadTimeoutIdsRef.current = [];
+      if (realtimeReloadTimeoutRef.current !== null) {
+        window.clearTimeout(realtimeReloadTimeoutRef.current);
+        realtimeReloadTimeoutRef.current = null;
+      }
     };
   }, [loadScenarios, loadTasks]);
 
@@ -310,6 +411,18 @@ export function TerminalPanel({ agent, commands, status }: TerminalPanelProps) {
       .map((execution) => mapExecutionToHistoryItem(execution, commandsById))
       .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
   }, [commandsById, serverExecutions]);
+  const diagnosticComparisons = useMemo(
+    () => buildDiagnosticComparisons(serverExecutions, commandsById),
+    [commandsById, serverExecutions],
+  );
+  const changedDiagnosticCount = useMemo(
+    () => diagnosticComparisons.filter((item) => item.comparisonState === "changed").length,
+    [diagnosticComparisons],
+  );
+  const ignoredDiagnosticCount = useMemo(
+    () => diagnosticComparisons.filter((item) => isIgnoredComparisonStatus(item.latestAttemptStatus)).length,
+    [diagnosticComparisons],
+  );
   const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
 
   const expandedExecutionIds = useMemo(() => expandedTaskIds.filter(Boolean), [expandedTaskIds]);
@@ -319,13 +432,15 @@ export function TerminalPanel({ agent, commands, status }: TerminalPanelProps) {
       onTaskQueued: ({ agentId, task }) => {
         if (agentId === agent.id) {
           patchExecutionFromRealtime(task);
-          void loadTasks();
+          scheduleRealtimeTasksReload();
         }
       },
       onTaskUpdated: ({ agentId, task }) => {
         if (agentId === agent.id) {
           patchExecutionFromRealtime(task);
-          void loadTasks();
+          if (isExecutionTerminalStatus(task.status)) {
+            scheduleRealtimeTasksReload(250);
+          }
         }
       },
       onExecutionLogReceived: (entry) => {
@@ -405,6 +520,28 @@ export function TerminalPanel({ agent, commands, status }: TerminalPanelProps) {
       return matchesStatus && matchesDate;
     });
   }, [selectedDate, statusFilter, tasks]);
+
+  const scenarioProgressItems = useMemo(() => {
+    return scenarioRuns.map((run) => {
+      const relatedTasks = run.executionIds
+        .map((executionId) => taskById.get(executionId))
+        .filter((task): task is ExecutionHistoryItem => Boolean(task));
+      const completedSteps = relatedTasks.filter((task) => isExecutionTerminalStatus(task.status)).length;
+      const runningSteps = relatedTasks.filter((task) => task.status === "running").length;
+      const failedSteps = relatedTasks.filter((task) => task.status === "error" || task.status === "cancelled" || task.status === "interrupted").length;
+      const totalSteps = run.executionIds.length;
+      const allCompleted = totalSteps > 0 && completedSteps >= totalSteps;
+
+      return {
+        ...run,
+        completedSteps,
+        runningSteps,
+        failedSteps,
+        totalSteps,
+        allCompleted,
+      };
+    }).sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+  }, [scenarioRuns, taskById]);
 
   const executeTemplateCommand = async (commandId: string, values: Record<number, string>) => {
     setRuntimeNotice(null);
@@ -493,6 +630,19 @@ export function TerminalPanel({ agent, commands, status }: TerminalPanelProps) {
           pushOptimisticTask(executionId, command.id);
         }
       });
+
+      if (executionIds.length) {
+        setScenarioRuns((current) => [
+          {
+            id: `${scenarioId}:${executionIds[0]}`,
+            scenarioId,
+            scenarioName: scenario.name,
+            executionIds,
+            createdAt: new Date().toISOString(),
+          },
+          ...current.filter((item) => item.scenarioId !== scenarioId || item.executionIds.join("|") !== executionIds.join("|")),
+        ].slice(0, 12));
+      }
 
       setRuntimeNotice(`Сценарий "${scenario.name}" поставлен в очередь: ${runnableCommands.length} шагов.`);
       scheduleTasksReload();
@@ -985,6 +1135,76 @@ export function TerminalPanel({ agent, commands, status }: TerminalPanelProps) {
                   История пока пустая.
                 </div>
               ) : null}
+
+              {scenarioProgressItems.length ? (
+                <div className="rounded-2xl border border-amber-400/15 bg-amber-400/[0.07] p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-amber-200/80">Прогресс сценариев</div>
+                  <div className="mt-3 space-y-2">
+                    {scenarioProgressItems.slice(0, 4).map((run) => (
+                      <div key={run.id} className="rounded-2xl border border-white/8 bg-black/20 p-3">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-medium text-white">{run.scenarioName}</div>
+                            <div className="mt-1 text-xs text-white/45">
+                              {formatTaskTime(run.createdAt)} · {run.completedSteps}/{run.totalSteps} шагов прошло
+                            </div>
+                          </div>
+                          <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-white/60">
+                            {run.allCompleted ? "Готово" : run.runningSteps ? "Выполняется" : "В очереди"}
+                          </span>
+                        </div>
+                        <div className="mt-3 h-2 overflow-hidden rounded-full border border-white/8 bg-white/[0.04]">
+                          <div
+                            className={`h-full rounded-full ${run.failedSteps ? "bg-rose-300" : run.allCompleted ? "bg-emerald-300" : "bg-amber-200"}`}
+                            style={{ width: `${run.totalSteps ? Math.max(6, (run.completedSteps / run.totalSteps) * 100) : 0}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="rounded-2xl border border-emerald-400/15 bg-emerald-400/[0.07] p-3">
+                <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-200/80">{DIAGNOSTIC_SUMMARY_TITLE}</div>
+                <div className="mt-2 text-xs text-white/65">{DIAGNOSTIC_SUMMARY_TEXT}</div>
+                <div className="mt-2 text-[11px] text-white/50">{DIAGNOSTIC_INTERRUPTED_NOTE}</div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-white/60">
+                    {changedDiagnosticCount ? `Изменений: ${changedDiagnosticCount}` : "Изменений пока нет"}
+                  </span>
+                  {ignoredDiagnosticCount ? (
+                    <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-white/50">
+                      Пропущено прерванных: {ignoredDiagnosticCount}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                {diagnosticComparisons.slice(0, 6).map((item) => (
+                  <div key={item.command.id} className={`rounded-2xl border p-3 ${getComparisonTone(item.comparisonState)}`}>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-sm font-medium">{item.command.name}</div>
+                      <div className="text-[10px] uppercase tracking-[0.18em]">
+                        {getComparisonLabel(item.comparisonState)}
+                      </div>
+                    </div>
+                    <div className="mt-2 space-y-1 text-xs leading-5">
+                      {getComparisonDetails(item).map((line, index) => (
+                        <div key={`${item.command.id}-${index}`} className="break-words">
+                          {line}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                {!diagnosticComparisons.length ? (
+                  <div className="rounded-2xl border border-dashed border-white/10 px-4 py-3 text-xs text-white/45">
+                    Для сравнения пока нет базовых диагностических запусков.
+                  </div>
+                ) : null}
+              </div>
             </div>
           </div>
         </div>

@@ -15,8 +15,7 @@ namespace Web.Extensions
                 .Bind(configuration.GetSection("JwtOptions"))
                 .PostConfigure(options =>
                 {
-                    options.Secret = Environment.GetEnvironmentVariable("JWT_SECRET")
-                        ?? configuration["JWT_SECRET"]
+                    options.Secret = GetSecret(configuration, "JWT_SECRET", "jwt_secret")
                         ?? options.Secret;
                 })
                 .ValidateOnStart();
@@ -25,13 +24,11 @@ namespace Web.Extensions
                 .Bind(configuration.GetSection("SmtpOptions"))
                 .PostConfigure(options =>
                 {
-                    options.Email = Environment.GetEnvironmentVariable("EMAIL")
-                        ?? configuration["EMAIL"]
+                    options.Email = GetSecret(configuration, "EMAIL", "email")
                         ?? options.Email;
 
-                    options.Password = Environment.GetEnvironmentVariable("EMAIL_PASSWORD")
-                    ?? configuration["EMAIL_PASSWORD"]
-                    ?? options.Password;
+                    options.Password = GetSecret(configuration, "EMAIL_PASSWORD", "email_password")
+                        ?? options.Password;
                 })
                 .ValidateOnStart();
 
@@ -67,17 +64,22 @@ namespace Web.Extensions
                 .Bind(configuration.GetSection("ConnectionOptions"))
                 .PostConfigure(options =>
                 {
-                    options.DatabasePassword = Environment.GetEnvironmentVariable("DB_PASSWORD")
-                        ?? configuration["DB_PASSWORD"]
+                    options.DatabasePassword = GetSecret(configuration, "DB_PASSWORD", "db_password")
                         ?? options.DatabasePassword;
 
-                    options.RedisPassword = Environment.GetEnvironmentVariable("REDIS_PASSWORD")
-                        ?? configuration["REDIS_PASSWORD"]
+                    options.RedisPassword = GetSecret(configuration, "REDIS_PASSWORD", "redis_password")
                         ?? options.RedisPassword;
                 })
                 .ValidateOnStart();
 
             return builder;
+        }
+
+        private static string? GetSecret(IConfiguration configuration, string envKey, string dockerSecretKey)
+        {
+            return Environment.GetEnvironmentVariable(envKey)
+                ?? configuration[envKey]
+                ?? configuration[dockerSecretKey];
         }
 
         public static IHostApplicationBuilder ValidateOptions(this IHostApplicationBuilder builder)

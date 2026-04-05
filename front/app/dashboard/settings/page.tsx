@@ -6,7 +6,7 @@ import { Mail, UserRound } from "lucide-react";
 import { AgentMetricsDashboard } from "@/components/agent-metrics-dashboard";
 import { EmailConfirmationPanel } from "@/components/email-confirmation-panel";
 import { GlassCard, PrimaryButton, SectionTitle, StatusBadge } from "@/components/ui";
-import { apiJson } from "@/lib/api-client";
+import { apiFetch, apiJson } from "@/lib/api-client";
 import type { AgentAnalyticsDto, AgentDto, AgentMetricsDto, PagedResult, Role, UserInfo } from "@/lib/backend-types";
 import { getAgentStatus, getDistributionLabel, getRelativeHeartbeatLabel, getRoleLabel } from "@/lib/backend-types";
 import { useClientRealtime } from "@/lib/client-realtime";
@@ -33,6 +33,9 @@ export default function SettingsPage() {
   const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const [metricsError, setMetricsError] = useState<string | null>(null);
   const [metricsLoading, setMetricsLoading] = useState(false);
+  const [analyticsExportBusy, setAnalyticsExportBusy] = useState<"Json" | "Csv" | "Pdf" | null>(null);
+  const [analyticsExportMessage, setAnalyticsExportMessage] = useState<string | null>(null);
+  const [analyticsExportOpen, setAnalyticsExportOpen] = useState(false);
   const [availableAgents, setAvailableAgents] = useState<AgentDto[]>([]);
   const [agentAnalytics, setAgentAnalytics] = useState<AgentAnalyticsDto[]>([]);
   const [agentMetrics, setAgentMetrics] = useState<AgentMetricsDto | null>(null);
@@ -346,6 +349,36 @@ export default function SettingsPage() {
     setProfileError("Смена почты пока недоступна.");
   };
 
+  const handleAnalyticsExport = async (format: "Json" | "Csv" | "Pdf") => {
+    setAnalyticsExportBusy(format);
+    setAnalyticsExportOpen(false);
+    setAnalyticsExportMessage(null);
+    setAnalyticsError(null);
+
+    try {
+      const response = await apiFetch(`/api/hackaton/export?format=${encodeURIComponent(format)}`, { method: "GET" });
+
+      if (!response.ok) {
+        throw new Error(`Экспорт ${format} вернул ошибку ${response.status}.`);
+      }
+
+      const blob = await response.blob();
+      const href = window.URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = href;
+      anchor.download = `analytics-export.${format.toLowerCase()}`;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      window.URL.revokeObjectURL(href);
+      setAnalyticsExportMessage(`Файл аналитики в формате ${format} подготовлен.`);
+    } catch (exportError) {
+      setAnalyticsError(exportError instanceof Error ? exportError.message : "Не удалось выгрузить аналитику.");
+    } finally {
+      setAnalyticsExportBusy(null);
+    }
+  };
+
   return (
     <div className="space-y-6 pb-10">
       <GlassCard className="p-5 sm:p-6">
@@ -414,6 +447,20 @@ export default function SettingsPage() {
           title="Состояние удалённых машин"
           subtitle="Реальные метрики по агентам: запуски, среднее время выполнения и ошибки за день."
         />
+
+        <GlassCard className="mb-4 p-5 sm:p-6">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div>
+              <div className="text-xl font-semibold text-white">Экспорт аналитики</div>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-white/55">
+                Сохрани общую аналитику по агентам, задачам и метрикам в документ `Json`, `Csv` или `Pdf`.
+              </p>
+            </div>
+            <PrimaryButton onClick={() => setAnalyticsExportOpen(true)} disabled={analyticsExportBusy !== null} className="min-w-[210px]">
+              {analyticsExportBusy ? "Подготовка..." : "Выгрузить аналитику"}
+            </PrimaryButton>
+          </div>
+        </GlassCard>
 
         <div className="grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
           <GlassCard className="p-5">
@@ -562,7 +609,36 @@ export default function SettingsPage() {
             {[analyticsError, metricsError].filter(Boolean).join(" ")}
           </div>
         ) : null}
+
+        {analyticsExportMessage ? (
+          <div className="mt-4 rounded-2xl border border-accent/15 bg-accent/[0.08] px-4 py-3 text-sm text-white/70">
+            {analyticsExportMessage}
+          </div>
+        ) : null}
       </section>
+
+      {analyticsExportOpen ? (
+        <SettingsModal
+          title="Выгрузка аналитики"
+          subtitle="Выбери формат файла для экспорта общей аналитики по агентам, командам и задачам."
+          onClose={() => setAnalyticsExportOpen(false)}
+        >
+          <div className="space-y-3">
+            {(["Json", "Csv", "Pdf"] as const).map((format) => (
+              <button
+                key={format}
+                type="button"
+                onClick={() => void handleAnalyticsExport(format)}
+                disabled={analyticsExportBusy !== null}
+                className="flex w-full items-center justify-between rounded-[1.35rem] border border-white/10 bg-white/[0.03] px-4 py-4 text-left text-white/80 transition hover:border-accent/25 hover:bg-accent/[0.08] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <span className="text-base font-medium text-white">{format}</span>
+                <span className="text-sm text-white/45">{analyticsExportBusy === format ? "Подготовка..." : "Скачать"}</span>
+              </button>
+            ))}
+          </div>
+        </SettingsModal>
+      ) : null}
 
       {passwordModalOpen ? (
         <SettingsModal

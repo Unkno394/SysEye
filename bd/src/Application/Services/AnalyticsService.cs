@@ -71,8 +71,8 @@ public class AnalyticsService(AppDbContext dbContext) : IAnalyticsService
     public async Task<AgentMetricsDto> GetAgentMetricsAsync(Guid userId, Guid agentId, CancellationToken cancellationToken = default)
     {
         var snapshot = await LoadAgentSnapshotAsync(userId, agentId, cancellationToken);
-        var tasks = snapshot.Tasks;
-        var completed = tasks.Where(IsCompletedTask).ToArray();
+        var tasks = FilterCountableAnalyticsTasks(snapshot.Tasks).ToArray();
+        var completed = tasks.Where(IsCompletedAnalyticsTask).ToArray();
         var today = FilterToday(tasks).ToArray();
         var last7Days = Enumerable.Range(0, 7)
             .Select(offset => DateOnly.FromDateTime(DateTime.UtcNow.Date.AddDays(-6 + offset)))
@@ -94,7 +94,7 @@ public class AnalyticsService(AppDbContext dbContext) : IAnalyticsService
                 .Select(day =>
                 {
                     var dayTasks = tasks.Where(task => DateOnly.FromDateTime(GetTaskDate(task)) == day).ToArray();
-                    var dayCompleted = dayTasks.Where(IsCompletedTask).ToArray();
+                    var dayCompleted = dayTasks.Where(IsCompletedAnalyticsTask).ToArray();
 
                     return new AgentMetricsPointDto
                     {
@@ -113,7 +113,7 @@ public class AnalyticsService(AppDbContext dbContext) : IAnalyticsService
     {
         var snapshots = await LoadAgentSnapshotsAsync(userId, cancellationToken);
         var completedAverages = snapshots
-            .Select(snapshot => snapshot.Tasks.Where(IsCompletedTask).Select(GetDurationSeconds).DefaultIfEmpty(0).Average())
+            .Select(snapshot => FilterCountableAnalyticsTasks(snapshot.Tasks).Where(IsCompletedAnalyticsTask).Select(GetDurationSeconds).DefaultIfEmpty(0).Average())
             .Where(value => value > 0)
             .ToArray();
         var globalAverageDuration = completedAverages.Any() ? completedAverages.Average() : 0;
@@ -121,8 +121,8 @@ public class AnalyticsService(AppDbContext dbContext) : IAnalyticsService
         var ratings = snapshots
             .Select(snapshot =>
             {
-                var tasks = snapshot.Tasks;
-                var completed = tasks.Where(IsCompletedTask).ToArray();
+                var tasks = FilterCountableAnalyticsTasks(snapshot.Tasks).ToArray();
+                var completed = tasks.Where(IsCompletedAnalyticsTask).ToArray();
                 var averageDuration = completed.Any() ? completed.Average(GetDurationSeconds) : 0;
                 var successRate = CalculateSuccessRate(tasks);
                 var errorsToday = FilterToday(tasks).Count(task => IsFailureStatus(task.Status));
@@ -261,8 +261,8 @@ public class AnalyticsService(AppDbContext dbContext) : IAnalyticsService
 
     private static AnalyticsDto BuildAnalytics(IEnumerable<TaskSnapshot> tasks)
     {
-        var snapshotArray = tasks.ToArray();
-        var completed = snapshotArray.Where(IsCompletedTask).ToArray();
+        var snapshotArray = FilterCountableAnalyticsTasks(tasks).ToArray();
+        var completed = snapshotArray.Where(IsCompletedAnalyticsTask).ToArray();
         var durations = completed.Select(GetDurationSeconds).ToArray();
 
         return new AnalyticsDto
@@ -280,6 +280,9 @@ public class AnalyticsService(AppDbContext dbContext) : IAnalyticsService
 
     private static bool IsCompletedTask(TaskSnapshot task) => task.StartedAt.HasValue && task.FinishedAt.HasValue;
 
+    private static bool IsCompletedAnalyticsTask(TaskSnapshot task)
+        => IsCompletedTask(task) && IsMeasuredTerminalStatus(task.Status);
+
     private static double GetDurationSeconds(TaskSnapshot task)
     {
         if (!task.FinishedAt.HasValue)
@@ -291,7 +294,13 @@ public class AnalyticsService(AppDbContext dbContext) : IAnalyticsService
     private static bool IsFailureStatus(string? status)
     {
         var normalized = NormalizeStatus(status);
-        return normalized is "error" or "cancelled" or "interrupted";
+        return normalized == "error";
+    }
+
+    private static bool IsIgnoredAnalyticsStatus(string? status)
+    {
+        var normalized = NormalizeStatus(status);
+        return normalized is "cancelled" or "interrupted";
     }
 
     private static string NormalizeStatus(string? status)
@@ -299,12 +308,20 @@ public class AnalyticsService(AppDbContext dbContext) : IAnalyticsService
         return string.IsNullOrWhiteSpace(status) ? "error" : status.Trim().ToLowerInvariant();
     }
 
+    private static bool IsMeasuredTerminalStatus(string? status)
+    {
+        var normalized = NormalizeStatus(status);
+        return normalized is "success" or "error";
+    }
+
+    private static IEnumerable<TaskSnapshot> FilterCountableAnalyticsTasks(IEnumerable<TaskSnapshot> tasks)
+        => tasks.Where(task => !IsIgnoredAnalyticsStatus(task.Status));
+
     private static double CalculateSuccessRate(IEnumerable<TaskSnapshot> tasks)
     {
         var completed = tasks.Where(task =>
         {
-            var normalized = NormalizeStatus(task.Status);
-            return normalized is "success" or "error" or "cancelled" or "interrupted";
+            return IsMeasuredTerminalStatus(task.Status);
         }).ToArray();
 
         if (!completed.Any())

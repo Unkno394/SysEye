@@ -1,95 +1,146 @@
-# Конфигурация
+# Конфигурация Backend
 
-Этот файл описывает все параметры конфигурации приложения, находящиеся в файле `appsettings.json`.
+Конфигурация загружается из:
 
-## LoggingOptions
+## 🐳 Docker
 
-Настройки логирования приложения.
+- `.env`
+- `Docker Secrets` через `/run/secrets/*`
 
-| Параметр | Тип | Назначение |
-|----------|-----|------------|
-| `LogLevel` | `string` | Уровень логирования. |
-| `ConsoleEnabled` | `bool` | Включено ли логирование в консоль. |
-| `FileEnabled` | `bool` | Включено ли логирование в файл. |
-| `LogPath` | `string` | Путь к файлу логов. |
+## 💻 Локально
 
-## JwtOptions
+- `appsettings.json`
+- локальные переменные окружения
+- user secrets при необходимости
 
-Настройки, связанные с JWT-аутентификацией и cookie.
+## ⚠️ Важно
 
-| Параметр | Тип | Назначение |
-|----------|-----|------------|
-| `AccessCookieName` | `string` | Имя cookie для access-токена. |
-| `RefreshCookieName` | `string` | Имя cookie для refresh-токена. |
-| `UserIdCookieName` | `string` | Имя cookie для ID пользователя. |
-| `SessionCookieName` | `string` | Имя cookie для ID сессии. |
-| `Issuer` | `string` | Выпускающий токен (issuer). |
-| `Audience` | `string` | Аудитория токена (audience). |
-| `AccessTokenExpirationMinutes` | `int` | Время жизни access-токена в минутах. |
-| `RefreshTokenExpirationDays` | `int` | Время жизни refresh-токена в днях. |
+Конфигурация валидируется через `IOptions` и `IValidateOptions`. Если обязательные значения отсутствуют или некорректны, приложение завершает запуск с ошибкой.
 
-## ConnectionOptions
+## 🔐 Secrets
 
-Настройки подключения к базам данных.
+Секреты читаются из `/run/secrets/*`.
 
-| Параметр | Тип | Назначение |
-|----------|-----|------------|
-| `DatabaseConnectionTemplate` | `string` | Шаблон строки подключения к PostgreSQL. |
-| `RedisConnectionTemplate` | `string` | Шаблон строки подключения к Redis. |
-| `RedisInstanceName` | `string` | Префикс для ключей в Redis. |
+Используются для:
 
-## VerificationCacheOptions
+| Секрет | Описание |
+|---|---|
+| `db_password` | Пароль PostgreSQL |
+| `jwt_secret` | Секрет JWT |
+| `redis_password` | Пароль Redis |
+| `email` | Email отправителя |
+| `email_password` | Пароль почты |
 
-Настройки времени жизни временных токенов (например, для подтверждения email или сброса пароля).
+## 🧾 LoggingOptions
 
-| Параметр | Тип | Назначение |
-|----------|-----|------------|
-| `TokenExpirationMinutes` | `int` | Время жизни токена в минутах. |
-| `EmailExpirationMinutes` | `int` | Время жизни email-ссылки в минутах. |
+| Поле | Тип | Описание |
+|---|---|---|
+| `LogLevel` | `string` | Уровень логирования |
+| `ConsoleEnabled` | `bool` | Включить вывод в консоль |
+| `FileEnabled` | `bool` | Включить запись в файл |
+| `LogPath` | `string` | Путь к лог-файлам |
 
-## TransactionOptions
+## 🔐 JwtOptions
 
-Настройки повторных попыток выполнения транзакций.
+| Поле | Тип | Описание |
+|---|---|---|
+| `AccessCookieName` | `string` | Cookie для access токена |
+| `RefreshCookieName` | `string` | Cookie для refresh токена |
+| `ResetPasswordCookieName` | `string` | Cookie для сброса пароля |
+| `UserIdCookieName` | `string` | Cookie с ID пользователя |
+| `SessionCookieName` | `string` | Cookie сессии |
+| `Issuer` | `string` | Издатель токена |
+| `Audience` | `string` | Аудитория |
+| `AccessTokenExpirationMinutes` | `int` | Время жизни access токена |
+| `RefreshTokenExpirationDays` | `int` | Время жизни refresh токена |
 
-| Параметр | Тип | Назначение |
-|----------|-----|------------|
-| `MaxRetryCount` | `int` | Максимальное количество попыток. |
-| `EnableRetryOnFailure` | `bool` | Включить ли повторную попытку при ошибке. |
-| `UseExponentialBackoff` | `bool` | Использовать ли экспоненциальную задержку между попытками. |
-| `FixedDelayMs` | `int` | Фиксированная задержка между попытками в миллисекундах (если UseExponentialBackoff = false). |
+`JwtOptions__Secret` должен быть длиннее 32 символов.
 
-## SmtpOptions
+## 🧪 SwaggerEnabled
 
-Настройки SMTP-сервера для отправки email.
+| Поле | Тип | Описание |
+|---|---|---|
+| `SwaggerEnabled` | `bool` | Включить Swagger UI |
 
-| Параметр | Тип | Назначение |
-|----------|-----|------------|
-| `Host` | `string` | Адрес SMTP-сервера. |
-| `Name` | `string` | Имя отправителя. |
-| `Port` | `int` | Порт SMTP-сервера. |
-| `MaxRetryAttempts` | `int` | Максимальное количество попыток отправки. |
-| `TimeoutSeconds` | `int` | Таймаут ожидания в секундах. |
-| `RetryDelaySeconds` | `int` | Задержка между попытками в секундах. |
-| `UseSsl` | `bool` | Использовать ли SSL. |
+## 🔌 ConnectionOptions
 
-## EmailTemplateOptions
+| Поле | Тип | Описание |
+|---|---|---|
+| `DatabaseConnectionTemplate` | `string` | Шаблон строки подключения PostgreSQL |
+| `RedisConnectionTemplate` | `string` | Шаблон строки подключения Redis |
+| `RedisInstanceName` | `string` | Префикс ключей Redis |
 
-Настройки шаблонов email-сообщений.
+📌 Важно:
+пароли подставляются в `{0}` из secrets.
 
-| Параметр | Тип | Назначение |
-|----------|-----|------------|
-| `ResourcesPath` | `string` | Путь к папке с ресурсами (шаблонами). |
-| `EmailTemplateWithButtonFileName` | `string` | Имя файла HTML-шаблона с кнопкой. |
+## 🔁 TransactionOptions
 
-## MistralOptions
+| Поле | Тип | Описание |
+|---|---|---|
+| `MaxRetryCount` | `int` | Максимальное число повторов |
+| `EnableRetryOnFailure` | `bool` | Включить retry |
+| `UseExponentialBackoff` | `bool` | Использовать exponential backoff |
+| `FixedDelayMs` | `int` | Фиксированная задержка в миллисекундах |
 
-Настройки для взаимодействия с API Mistral AI.
+## 🔑 ApiKeyOptions
 
-| Параметр | Тип | Назначение |
-|----------|-----|------------|
-| `BaseUrl` | `string` | Базовый URL API. |
-| `BaseAgentVersion` | `int` | Версия агента. |
-| `RetryCount` | `int` | Количество попыток запроса. |
-| `BaseAgentId` | `string` | ID агента. |
+| Поле | Тип | Описание |
+|---|---|---|
+| `ApiKeyHeader` | `string` | HTTP заголовок API ключа |
+| `AgentIdHeader` | `string` | HTTP заголовок ID агента |
+| `UseApiKeyAccess` | `bool` | Включить авторизацию по API ключу |
 
-> **Примечание:** Все настройки валидируются при запуске приложения с помощью `IValidateOptions`.
+## 📬 SmtpOptions
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `Host` | `string` | SMTP сервер |
+| `Name` | `string` | Имя отправителя |
+| `Port` | `int` | Порт |
+| `MaxRetryAttempts` | `int` | Количество попыток отправки |
+| `UsePortAndSsl` | `bool` | Использовать SSL |
+| `TimeoutSeconds` | `int` | Таймаут запроса |
+| `RetryDelaySeconds` | `int` | Задержка между попытками |
+
+Email и пароль берутся из secrets:
+
+- `EMAIL`
+- `EMAIL_PASSWORD`
+
+## 📊 LokiOptions
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `BaseUrl` | `string` | URL Loki |
+| `TimeoutSeconds` | `int` | Таймаут запросов |
+
+## 📡 OpenTelemetryOptions
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `Endpoint` | `string` | Endpoint OTel Collector |
+
+## 📧 EmailTemplateOptions
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `ResourcesPath` | `string` | Путь к шаблонам email |
+| `EmailTemplateWithCodeFileName` | `string` | Имя HTML шаблона |
+
+## 🔐 VerificationOptions
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `EmailTokenExpirationMinutes` | `int` | Время жизни кода подтверждения |
+| `EmailTokenLength` | `int` | Длина кода подтверждения |
+| `PasswordTokenExpirationMinutes` | `int` | Время жизни кода сброса пароля |
+| `PasswordTokenLength` | `int` | Длина кода сброса пароля |
+
+## 🌐 AllowedOrigins
+
+| Поле | Тип | Описание |
+|---|---|---|
+| `AllowedOrigins` | `string` | Список разрешённых CORS origin |
+
+📌 Формат:
+строка через запятую.
