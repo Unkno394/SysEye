@@ -1034,7 +1034,8 @@ export function TerminalPanel({ agent, commands, status }: TerminalPanelProps) {
         </div>
 
         <div className="border-t border-line bg-white/[0.03] p-4 sm:p-5 lg:border-l lg:border-t-0">
-          <div className="flex h-[60svh] min-h-[320px] flex-col overflow-hidden rounded-[1.75rem] border border-white/8 bg-black/20 p-4 sm:h-[68svh] sm:p-5 lg:h-[720px]">
+          <div className="flex flex-col gap-4">
+            <div className="flex h-[60svh] min-h-[320px] flex-col overflow-hidden rounded-[1.75rem] border border-white/8 bg-black/20 p-4 sm:h-[68svh] sm:p-5 lg:h-[720px]">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <h3 className="text-sm font-semibold uppercase tracking-[0.22em] text-white/55">История выполнения</h3>
@@ -1164,24 +1165,31 @@ export function TerminalPanel({ agent, commands, status }: TerminalPanelProps) {
                   </div>
                 </div>
               ) : null}
+            </div>
+          </div>
 
-              <div className="rounded-2xl border border-emerald-400/15 bg-emerald-400/[0.07] p-3">
-                <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-200/80">{DIAGNOSTIC_SUMMARY_TITLE}</div>
-                <div className="mt-2 text-xs text-white/65">{DIAGNOSTIC_SUMMARY_TEXT}</div>
-                <div className="mt-2 text-[11px] text-white/50">{DIAGNOSTIC_INTERRUPTED_NOTE}</div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-white/60">
-                    {changedDiagnosticCount ? `Изменений: ${changedDiagnosticCount}` : "Изменений пока нет"}
-                  </span>
-                  {ignoredDiagnosticCount ? (
-                    <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-white/50">
-                      Пропущено прерванных: {ignoredDiagnosticCount}
-                    </span>
-                  ) : null}
+            <div className="rounded-[1.75rem] border border-emerald-400/15 bg-[linear-gradient(180deg,rgba(88,255,179,0.08),rgba(0,0,0,0.12))] p-4 sm:p-5">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <h3 className="text-sm font-semibold uppercase tracking-[0.22em] text-emerald-200/80">{DIAGNOSTIC_SUMMARY_TITLE}</h3>
+                  <p className="mt-1 text-xs text-white/65">{DIAGNOSTIC_SUMMARY_TEXT}</p>
+                  <p className="mt-2 text-[11px] text-white/50">{DIAGNOSTIC_INTERRUPTED_NOTE}</p>
                 </div>
+                <div className="text-xs text-white/40">Last heartbeat: {getRelativeHeartbeatLabel(agent.lastHeartbeatAt)}</div>
               </div>
 
-              <div className="space-y-2">
+              <div className="mt-4 flex flex-wrap gap-2">
+                <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-white/60">
+                  {changedDiagnosticCount ? `Изменений: ${changedDiagnosticCount}` : "Изменений пока нет"}
+                </span>
+                {ignoredDiagnosticCount ? (
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-white/50">
+                    Пропущено прерванных: {ignoredDiagnosticCount}
+                  </span>
+                ) : null}
+              </div>
+
+              <div className="mt-4 space-y-2">
                 {diagnosticComparisons.slice(0, 6).map((item) => (
                   <div key={item.command.id} className={`rounded-2xl border p-3 ${getComparisonTone(item.comparisonState)}`}>
                     <div className="flex items-center justify-between gap-3">

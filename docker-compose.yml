@@ -125,18 +125,9 @@ services:
       dockerfile: Dockerfile
     env_file:
       - ./front/.env
-    environment:
-      HACKATON_API_BASE_URL: http://backend
-      NEXT_PUBLIC_HACKATON_API_BASE_URL: http://127.0.0.1:5000
-      NEXT_PUBLIC_AGENT_SERVER_URL: http://localhost:5000
     restart: unless-stopped
     ports:
       - "3001:3000"
-    depends_on:
-      backend:
-        condition: service_healthy
-      email-fallback:
-        condition: service_healthy
     networks:
       - syseye-network
 
